@@ -1,4 +1,4 @@
-Fname: Installing via pip and running
+name: Installing via pip and running
 run-name: pip install and run
 on: [ push, pull_request ]
 jobs:
