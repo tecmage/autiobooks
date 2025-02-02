@@ -37,6 +37,20 @@ def get_language_from_voice(voice):
         return "en-us"
     elif voice.startswith("b"):
         return "en-gb"
+    elif voice.startswith("e"):
+        return "es"
+    elif voice.startswith("f"):
+        return "fr-fr"
+    elif voice.startswith("h"):
+        return "hi"
+    elif voice.startswith("i"):
+        return "it"
+    elif voice.startswith("j"):
+        return "ja"
+    elif voice.startswith("p"):
+        return "pt-br"
+    elif voice.startswith("z"):
+        return "cmn"
     else:
         print("Voice not recognized.")
         exit(1)
@@ -88,13 +102,24 @@ def start_gui():
     speed_entry.insert(0, "1.0")
     speed_entry.pack(side=tk.LEFT, pady=5, padx=5)
     speed_entry.bind('<KeyRelease>', check_speed_range)
+
+    # add a tickbox to enable/disable GPU acceleration
+    gpu_acceleration = tk.BooleanVar()
+    gpu_acceleration.set(False)
+    gpu_acceleration_checkbox = tk.Checkbutton(
+        voice_frame,
+        text="Enable GPU acceleration",
+        variable=gpu_acceleration,
+        font=('Arial', 12)
+    )
+    gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=5)
     
     # add a combo box with voice options
     voice_label = tk.Label(voice_frame, text="Select Voice:", font=('Arial', 12))
     voice_label.pack(side=tk.LEFT, pady=5, padx=5)
 
     # add a combo box with voice options
-    voices = ["af_sky"]
+    from voices import voices
     voices = [emojify_voice(x) for x in voices]
     voice_combo = ttk.Combobox(
         voice_frame,
@@ -170,7 +195,8 @@ def start_gui():
         def run_conversion():
             try:
                 chapters = [chapters_selected_listbox.get(i) for i in range(chapters_selected_listbox.size())]
-                main(file_path, voice, float(speed), chapters)
+                enable_gpu = gpu_acceleration.get()
+                main(file_path, voice, float(speed), chapters, enable_gpu)
             finally:
                 # Ensure controls are re-enabled even if an error occurs
                 root.after(0, enable_controls)

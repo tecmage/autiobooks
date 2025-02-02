@@ -21,7 +21,15 @@ from tempfile import NamedTemporaryFile
 sample_rate = 24000
 
 
-def main(file_path, voice, speed, chapters_by_name):
+def main(file_path, voice, speed, chapters_by_name, gpu_acceleration):
+
+    if gpu_acceleration:
+        if torch.cuda.is_available():
+            print('CUDA GPU available')
+            torch.set_default_device('cuda')
+        else:
+            print('CUDA GPU not available. Defaulting to CPU')
+
     filename = Path(file_path).name
     warnings.simplefilter("ignore")
     book = epub.read_epub(file_path)
