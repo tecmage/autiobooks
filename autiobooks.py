@@ -5,7 +5,7 @@ import threading
 import io
 import ebooklib
 from PIL import Image, ImageTk
-from engine import main, voices
+from engine import main
 
 
 class TextRedirector:
@@ -14,7 +14,7 @@ class TextRedirector:
 
     def write(self, str):
         self.text_widget.configure(state='normal')
-        self.text_widget.insert(tk.END, str)~
+        self.text_widget.insert(tk.END, str)
         self.text_widget.see(tk.END)
         self.text_widget.configure(state='disabled')
 
@@ -94,7 +94,7 @@ def start_gui():
     voice_label.pack(side=tk.LEFT, pady=5, padx=5)
 
     # add a combo box with voice options
-    from engine import voices
+    voices = ["af_sky"]
     voices = [emojify_voice(x) for x in voices]
     voice_combo = ttk.Combobox(
         voice_frame,
@@ -170,7 +170,7 @@ def start_gui():
         def run_conversion():
             try:
                 chapters = [chapters_selected_listbox.get(i) for i in range(chapters_selected_listbox.size())]
-                main(file_path, voice, False, float(speed), chapters, None)
+                main(file_path, voice, float(speed), chapters)
             finally:
                 # Ensure controls are re-enabled even if an error occurs
                 root.after(0, enable_controls)
