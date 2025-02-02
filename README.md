@@ -1,4 +1,4 @@
-# Autiobooks Automatically convert epubs to audiobooks
+# Autiobooks: Automatically convert epubs to audiobooks
 [![Installing via pip and running](https://github.com/plusuncold/autiobooks/actions/workflows/pip-install.yaml/badge.svg)](https://github.com/plusuncold/autiobooks/actions/workflows/pip-install.yaml)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/autiobooks)
 ![PyPI - Version](https://img.shields.io/pypi/v/autiobooks)
@@ -31,5 +31,5 @@ and at the end it will produce a `book.m4b` file with the whole book you can lis
 It will only produce the `.m4b` file if you have `ffmpeg` installed on your machine.
 
 ## Author
-by David Nesbitt, distributed under MIT license. Check out the excellent project [https://github.com/sanatic/audiblez](Audiblez) if you'd prefer a
-command-line interface. This project uses some code from the project but will diverge.
+by David Nesbitt, distributed under MIT license. Check out the excellent project [audiblez](https://github.com/santinic/audiblez) if you'd prefer a
+command-line interface. This project uses some code from the project but has diverged.
