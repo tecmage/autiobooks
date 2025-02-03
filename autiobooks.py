@@ -136,7 +136,7 @@ def start_gui():
     pil_image = Image.new('RGB', (200, 300), 'gray')
     cover_image = ImageTk.PhotoImage(pil_image)  # or use a default image
     cover_label = tk.Label(root, image=cover_image)
-    chapters_by_name = []
+    chapters = []
 
     def resized_image(item):
         image_data = item.get_content()
@@ -161,6 +161,23 @@ def start_gui():
                 if 'cover' in item.get_name().lower():
                     return resized_image(item)
         return None
+    
+    def add_chapters_to_checkbox_frame():
+        for chapter in chapters:
+            var = tk.BooleanVar()
+            checkbox = tk.Checkbutton(
+                checkbox_frame,
+                text=chapter,
+                variable=var,
+                font=('Arial', 12)
+            )
+            checkbox.pack(anchor="w")
+            checkbox_vars[chapter] = var
+    
+    def remove_chapters_from_checkbox_frame():
+        for widget in checkbox_frame.winfo_children():
+            widget.destroy()
+        checkbox_vars.clear()
 
     def select_file():
         file_path = filedialog.askopenfilename(
@@ -179,14 +196,13 @@ def start_gui():
                 cover_label.configure(image=cover_image)
             
             # set chapters
-            chapters_by_name.clear()
-            chapters_listbox.delete(0, tk.END)
+            chapters.clear()
+            remove_chapters_from_checkbox_frame()
             for item in book.get_items():
                 if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    chapters_by_name.append(item.get_name())
-            chapters_by_name.sort()
-            for chapter in chapters_by_name:
-                chapters_listbox.insert(tk.END, chapter)
+                    chapters.append(item.get_name())
+            chapters.sort()
+            add_chapters_to_checkbox_frame()
             
     
     def convert():
@@ -196,9 +212,9 @@ def start_gui():
         
         def run_conversion():
             try:
-                chapters = [chapters_selected_listbox.get(i) for i in range(chapters_selected_listbox.size())]
+                chapters_selected = [chapter for chapter, var in checkbox_vars.items() if var.get()]
                 enable_gpu = gpu_acceleration.get()
-                main(file_path, voice, float(speed), chapters, enable_gpu)
+                main(file_path, voice, float(speed), chapters_selected, enable_gpu)
             finally:
                 # Ensure controls are re-enabled even if an error occurs
                 root.after(0, enable_controls)
@@ -248,97 +264,31 @@ def start_gui():
     cover_label.image = cover_image  # Keep a reference to prevent garbage collection
     cover_label.pack(pady=10)
 
-    # Create frame for listbox and scrollbar
-    chapters_frame = ttk.Frame(root)
-    chapters_frame.pack(expand=True, padx=10, pady=10)
-
-    # Create left frame for chapters_listbox
-    left_frame = ttk.Frame(chapters_frame)
-    left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    # Create middle frame for buttons
-    middle_frame = ttk.Frame(chapters_frame)
-    middle_frame.pack(side=tk.LEFT, padx=10)
-
-    # Create right frame for selected chapters
-    right_frame = ttk.Frame(chapters_frame)
-    right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    # Left listbox and scrollbar
-    scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-    chapters_listbox = tk.Listbox(
-        left_frame,
-        selectmode=tk.MULTIPLE,
-        yscrollcommand=scrollbar.set,
-        font=('Arial', 12),
-        width=60,
-        height=10
-    )
-    chapters_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scrollbar.config(command=chapters_listbox.yview)
-
-    def on_add_select():
-        selected = chapters_listbox.curselection()
-        for i in selected:
-            chapters_selected_listbox.insert(tk.END, chapters_listbox.get(i))
-
-    def on_remove_select():
-        selected = chapters_selected_listbox.curselection()
-        for i in selected:
-            chapters_selected_listbox.delete(i)
+    # Create main container frame
+    container = tk.Frame(root)
+    container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
     
-    def on_add_all():
-        for i in range(chapters_listbox.size()):
-            chapters_selected_listbox.insert(tk.END, chapters_listbox.get(i))
-
-
-    # Middle buttons
-    add_button = tk.Button(
-        middle_frame,
-        text='Add selected chapters',
-        bg='white',
-        fg='black',
-        font=('Arial', 12),
-        command=on_add_select
+    # Create canvas and scrollbar
+    canvas = tk.Canvas(container)
+    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    
+    # Create frame for checkboxes inside canvas
+    checkbox_frame = tk.Frame(canvas)
+    checkbox_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
     )
-    add_button.pack(pady=5)
-
-    remove_button = tk.Button(
-        middle_frame,
-        text='Remove selected chapters',
-        bg='white',
-        fg='black',
-        font=('Arial', 12),
-        command=on_remove_select
-    )
-    remove_button.pack(pady=5)
-
-    add_all_button = tk.Button(
-        middle_frame,
-        text='Add all chapters',
-        bg='white',
-        fg='black',
-        font=('Arial', 12),
-        command=on_add_all
-    )
-    add_all_button.pack(pady=5)
-
-    # Right listbox and scrollbar
-    scrollbar_selected = ttk.Scrollbar(right_frame, orient=tk.VERTICAL)
-    scrollbar_selected.pack(side=tk.RIGHT, fill=tk.Y)
-
-    chapters_selected_listbox = tk.Listbox(
-        right_frame,
-        selectmode=tk.MULTIPLE,
-        yscrollcommand=scrollbar_selected.set,
-        font=('Arial', 12),
-        width=60,
-        height=10
-    )
-    chapters_selected_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scrollbar_selected.config(command=chapters_selected_listbox.yview)
+    
+    # Add frame to canvas
+    canvas.create_window((0, 0), window=checkbox_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Pack scrollbar and canvas
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    
+    # Dictionary to store checkbox variables
+    checkbox_vars = {}
 
     start_convert_button = tk.Button(
         root,
