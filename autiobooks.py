@@ -112,7 +112,9 @@ def start_gui():
         variable=gpu_acceleration,
         font=('Arial', 12)
     )
-    gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=5)
+    mac_os = sys.platform == 'darwin'
+    if not mac_os:
+        gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=5)
     
     # add a combo box with voice options
     voice_label = tk.Label(voice_frame, text="Select Voice:", font=('Arial', 12))
