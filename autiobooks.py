@@ -167,7 +167,7 @@ def start_gui():
             var = tk.BooleanVar()
             checkbox = tk.Checkbutton(
                 checkbox_frame,
-                text=chapter,
+                text=chapter.file_name,
                 variable=var,
                 font=('Arial', 12)
             )
@@ -196,12 +196,12 @@ def start_gui():
                 cover_label.configure(image=cover_image)
             
             # set chapters
-            chapters.clear()
+            chapters_from_book = find_document_chapters_and_extract_texts(book)
             remove_chapters_from_checkbox_frame()
-            for item in book.get_items():
+            for item in chapters_from_book:
                 if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    chapters.append(item.get_name())
-            chapters.sort()
+                    chapters.append(item)
+            chapters.sort(key=lambda x: x.file_name)
             add_chapters_to_checkbox_frame()
             
     
