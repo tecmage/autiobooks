@@ -11,6 +11,8 @@ import pygame.mixer
 import soundfile
 import numpy as np
 
+playing_sample = False
+
 
 class TextRedirector:
     def __init__(self, text_widget):
@@ -32,7 +34,11 @@ LANGUAGE_TO_FLAG = {
     "fr-fr": "🇫🇷",
     "ja": "🇯🇵",
     "ko": "🇰🇷",
-    "cmn": "🇨🇳"
+    "cmn": "🇨🇳",
+    "es": "🇪🇸",
+    "hi": "🇮🇳",
+    "it": "🇮🇹",
+    "pt-br": "🇧🇷"
 }
 
 
@@ -83,7 +89,7 @@ def start_gui():
     voice_frame.pack(pady=5, padx=5)
 
     # add a scale to set speed
-    speed_label = tk.Label(voice_frame, text="Set speed:", font=('Arial', 12))
+    speed_label = tk.Label(voice_frame, text="Reading speed:", font=('Arial', 12))
     speed_label.pack(side=tk.LEFT, pady=5, padx=5)
 
     def check_speed_range(event=None):
@@ -126,6 +132,8 @@ def start_gui():
 
     # add a combo box with voice options
     from voices import voices
+    # filter out the non-english voices (not working yet)
+    voices = [ x for x in voices if x.startswith("a") or x.startswith("b")]
     voices = [emojify_voice(x) for x in voices]
     voice_combo = ttk.Combobox(
         voice_frame,
@@ -170,14 +178,26 @@ def start_gui():
         return None
     
     def get_limited_text(text):
-        max_length = 25 # limit to 25 words
+        max_length = 25  # limit to 25 words
         words = text.split()
         if len(words) > max_length:
             return ' '.join(words[:max_length])
         return text
     
-    def handle_chapter_click(chapter):
+    def handle_chapter_click(chapter, play_label):
+        global playing_sample
+        if playing_sample:
+            pygame.mixer.music.stop()
+            playing_sample = False
+            play_label.config(text="▶️")
+            return
+        
         text = get_limited_text(chapter.extracted_text)
+        if not text:
+            return
+        
+        playing_sample = True
+        play_label.config(text="⏹️")
         voice = deemojify_voice(voice_combo.get())
         speed = float(speed_entry.get())
         audio_segments = gen_audio_segments(text, voice, speed,
@@ -231,8 +251,9 @@ def start_gui():
             character_count_label.pack(side="left")
 
             checkbox_vars[chapter] = var
-            play_label.bind("<Button-1>", lambda e,
-                          ch=chapter: handle_chapter_click(ch))
+            play_label.bind("<Button-1>",
+                            lambda e, ch=chapter, pl=play_label:
+                            handle_chapter_click(ch, pl))
     
     def remove_chapters_from_checkbox_frame():
         for widget in checkbox_frame.winfo_children():
@@ -256,12 +277,12 @@ def start_gui():
                 cover_label.configure(image=cover_image)
             
             # set chapters
+            chapters.clear()
             chapters_from_book = find_document_chapters_and_extract_texts(book)
             remove_chapters_from_checkbox_frame()
             for item in chapters_from_book:
                 if item.get_type() == ebooklib.ITEM_DOCUMENT:
                     chapters.append(item)
-            chapters.sort(key=lambda x: x.file_name)
             add_chapters_to_checkbox_frame()
             
     
