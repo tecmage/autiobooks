@@ -179,6 +179,7 @@ def start_gui():
     
     def get_limited_text(text):
         max_length = 25  # limit to 25 words
+        text = text.replace("\n", " ")
         words = text.split()
         if len(words) > max_length:
             return ' '.join(words[:max_length])
@@ -243,12 +244,20 @@ def start_gui():
 
             word_count = len(chapter.extracted_text.split())
             word_string = "words" if word_count != 1 else "word"
-            character_count_label = tk.Label(
+            word_count_label = tk.Label(
                 row_frame,
                 text=f"({word_count} {word_string})",
                 font=('Arial', 12)
             )
-            character_count_label.pack(side="left")
+            word_count_label.pack(side="left")
+
+            beginning_text_label = tk.Label(
+                row_frame,
+                text=get_limited_text(chapter.extracted_text),
+                font=('Arial', 12),
+                fg="#666666"
+            )
+            beginning_text_label.pack(side="left")
 
             checkbox_vars[chapter] = var
             play_label.bind("<Button-1>",
