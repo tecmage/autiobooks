@@ -5,7 +5,11 @@ import threading
 import io
 import ebooklib
 from PIL import Image, ImageTk
-from engine import main
+from engine import main, find_document_chapters_and_extract_texts
+from engine import gen_audio_segments
+import pygame.mixer
+import soundfile
+import numpy as np
 
 
 class TextRedirector:
@@ -131,7 +135,10 @@ def start_gui():
     )
     voice_combo.set(voices[0])  # Set default selection
     voice_combo.pack(side=tk.LEFT, pady=10, padx=5)
-
+    
+    pygame.mixer.init()
+    pygame.mixer.music.set_volume(0.7)
+    
     # ui element variables
     pil_image = Image.new('RGB', (200, 300), 'gray')
     cover_image = ImageTk.PhotoImage(pil_image)  # or use a default image
@@ -162,17 +169,70 @@ def start_gui():
                     return resized_image(item)
         return None
     
+    def get_limited_text(text):
+        max_length = 25 # limit to 25 words
+        words = text.split()
+        if len(words) > max_length:
+            return ' '.join(words[:max_length])
+        return text
+    
+    def handle_chapter_click(chapter):
+        text = get_limited_text(chapter.extracted_text)
+        voice = deemojify_voice(voice_combo.get())
+        speed = float(speed_entry.get())
+        audio_segments = gen_audio_segments(text, voice, speed,
+                                            split_pattern=r"")
+        final_audio = np.concatenate(audio_segments)
+        sample_rate = 24000
+        # could potentially use sounddevice and play audio
+        # sd.play(final_audio, sample_rate)
+        # sd.wait()
+        # sd.stop()
+        # this would avoid having to import pygame
+        soundfile.write("temp.wav", final_audio, sample_rate)
+        pygame.mixer.music.load("temp.wav")
+        pygame.mixer.music.play()
+    
     def add_chapters_to_checkbox_frame():
         for chapter in chapters:
             var = tk.BooleanVar()
+
+            row_frame = tk.Frame(checkbox_frame)
+            row_frame.pack(anchor="w")
+
             checkbox = tk.Checkbutton(
-                checkbox_frame,
-                text=chapter.file_name,
+                row_frame,
                 variable=var,
                 font=('Arial', 12)
             )
-            checkbox.pack(anchor="w")
+            checkbox.pack(side="left")
+
+            play_label = tk.Label(
+                row_frame,
+                text="▶️",
+                font=('Arial', 12)
+            )
+            play_label.pack(side="left")
+
+            file_name_label = tk.Label(
+                row_frame,
+                text=chapter.file_name,
+                font=('Arial', 12)
+            )
+            file_name_label.pack(side="left")
+
+            word_count = len(chapter.extracted_text.split())
+            word_string = "words" if word_count != 1 else "word"
+            character_count_label = tk.Label(
+                row_frame,
+                text=f"({word_count} {word_string})",
+                font=('Arial', 12)
+            )
+            character_count_label.pack(side="left")
+
             checkbox_vars[chapter] = var
+            play_label.bind("<Button-1>", lambda e,
+                          ch=chapter: handle_chapter_click(ch))
     
     def remove_chapters_from_checkbox_frame():
         for widget in checkbox_frame.winfo_children():
