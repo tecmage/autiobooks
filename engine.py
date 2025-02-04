@@ -14,7 +14,6 @@ from bs4 import BeautifulSoup
 from kokoro import KPipeline
 from ebooklib import epub
 from pydub import AudioSegment
-from pick import pick
 from tempfile import NamedTemporaryFile
 
 
@@ -107,10 +106,11 @@ def main(file_path, voice, speed, chapters_by_name, gpu_acceleration):
         create_m4b(chapter_mp3_files, filename, cover_image)
 
 
-def gen_audio_segments(text, voice, speed):
+def gen_audio_segments(text, voice, speed, split_pattern=r'\n+'):
     pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
     audio_segments = []
-    for gs, ps, audio in pipeline(text, voice=voice, speed=speed, split_pattern=r'\n+'):
+    for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
+                                  split_pattern=split_pattern):
         audio_segments.append(audio)
     return audio_segments
 
@@ -156,15 +156,6 @@ def find_chapters(document_chapters, verbose=False):
         print('Not easy to find the chapters, defaulting to all available documents.')
         chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT]
     return chapters
-
-
-def pick_chapters(chapters):
-    all_chapters_names = [c.get_name() for c in chapters if c.get_type() == ebooklib.ITEM_DOCUMENT]
-    title = 'Select which chapters to read in the audiobook'
-    selected_chapters_names = pick(all_chapters_names, title, multiselect=True, min_selection_count=1)
-    selected_chapters_names = [c[0] for c in selected_chapters_names]
-    selected_chapters = [c for c in chapters if c.get_name() in selected_chapters_names]
-    return selected_chapters
 
 
 def strfdelta(tdelta, fmt='{D:02}d {H:02}h {M:02}m {S:02}s'):
