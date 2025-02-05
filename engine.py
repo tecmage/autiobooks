@@ -168,5 +168,5 @@ def convert_text_to_wav_file(text, voice, speed, filename,
     if audio:
         audio = np.concatenate(audio)
         soundfile.write(filename, audio, SAMPLE_RATE)
-    else:
-        return None
+        return True
+    return False

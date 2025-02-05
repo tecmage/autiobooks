@@ -150,6 +150,11 @@ def start_gui():
         checkbox_vars.clear()
 
         for chapter in chapters:
+            word_count = len(chapter.extracted_text.split())
+
+            if word_count == 0:
+                continue
+
             var = tk.BooleanVar()
 
             row_frame = tk.Frame(checkbox_frame)
@@ -176,7 +181,6 @@ def start_gui():
             )
             file_name_label.pack(side="left")
 
-            word_count = len(chapter.extracted_text.split())
             word_string = "words" if word_count != 1 else "word"
             word_count_label = tk.Label(
                 row_frame,
@@ -252,7 +256,7 @@ def start_gui():
                         wav_files.append(wav_filename)
                     current_step += 1
                     progress['value'] = (current_step / steps) * 100
-                
+
                 if not wav_files:
                     messagebox.showerror("Error",
                                          "No chapters were selected.")
@@ -268,7 +272,6 @@ def start_gui():
             finally:
                 # Ensure controls are re-enabled even if an error occurs
                 root.after(0, enable_controls)
-                progress['value'] = 0
         
         if not check_speed_range():
             warning = "Please enter a speed value between 0.5 and 2.0."
