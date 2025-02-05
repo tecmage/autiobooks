@@ -401,4 +401,8 @@ def start_gui():
 
 
 if __name__ == "__main__":
-    start_gui()
+    if len(sys.argv) == 2 and sys.argv[1] == '--help':
+        # print README.md
+        print(open('README.md').read())
+    else:
+        start_gui()
