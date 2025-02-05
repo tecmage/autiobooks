@@ -21,7 +21,9 @@ book = None
 def start_gui():
     root = tk.Tk()
     root.title('Autiobooks')
-    root.geometry('1200x900')
+    window_width = 1000
+    window_height = 900
+    root.geometry(f"{window_width}x{window_height}")
     root.resizable(False, False)
 
     # check ffmpeg is installed
@@ -353,14 +355,18 @@ def start_gui():
     # add a progress bar
     progress_frame = tk.Frame(root)
     progress_frame.pack(pady=5)
+    progress_frame.grid_columnconfigure(0, weight=4)
+    progress_frame.grid_columnconfigure(1, weight=1)
+
+    prog_width = window_width * (0.8 - 0.1)
     progress = ttk.Progressbar(progress_frame, orient="horizontal",
-                               length=200, mode="determinate")
-    progress.pack(pady=20)
+                               length=prog_width, mode="determinate")
+    progress.grid(row=0, column=0, padx=5, pady=20, sticky="ew")
 
     progress_label = tk.Label(progress_frame,
-                              text="Conversion Progress",
+                              text="---",
                               font=('Arial', 12))
-    progress_label.pack(pady=5)
+    progress_label.grid(row=0, column=1, padx=5, pady=20)
 
     # start main loop
     root.mainloop()
