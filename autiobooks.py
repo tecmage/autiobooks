@@ -2,81 +2,20 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import sys
 import threading
-import io
-import ebooklib
 from PIL import Image, ImageTk
-from engine import main, find_document_chapters_and_extract_texts
-from engine import gen_audio_segments
+from pathlib import Path
+from engine import get_gpu_acceleration_available, gen_audio_segments
+from engine import set_gpu_acceleration, convert_text_to_wav_file
+from engine import create_index_file, create_m4b, get_cover_image
+from engine import get_book
 import pygame.mixer
 import soundfile
 import numpy as np
+import shutil
+from voices_lang import voices, voices_emojified, deemojify_voice
 
 playing_sample = False
-
-
-class TextRedirector:
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-
-    def write(self, str):
-        self.text_widget.configure(state='normal')
-        self.text_widget.insert(tk.END, str)
-        self.text_widget.see(tk.END)
-        self.text_widget.configure(state='disabled')
-
-    def flush(self):
-        pass
-
-
-LANGUAGE_TO_FLAG = {
-    "en-us": "🇺🇸",
-    "en-gb": "🇬🇧",
-    "fr-fr": "🇫🇷",
-    "ja": "🇯🇵",
-    "ko": "🇰🇷",
-    "cmn": "🇨🇳",
-    "es": "🇪🇸",
-    "hi": "🇮🇳",
-    "it": "🇮🇹",
-    "pt-br": "🇧🇷"
-}
-
-
-def get_language_from_voice(voice):
-    if voice.startswith("a"):
-        return "en-us"
-    elif voice.startswith("b"):
-        return "en-gb"
-    elif voice.startswith("e"):
-        return "es"
-    elif voice.startswith("f"):
-        return "fr-fr"
-    elif voice.startswith("h"):
-        return "hi"
-    elif voice.startswith("i"):
-        return "it"
-    elif voice.startswith("j"):
-        return "ja"
-    elif voice.startswith("p"):
-        return "pt-br"
-    elif voice.startswith("z"):
-        return "cmn"
-    else:
-        print("Voice not recognized.")
-        exit(1)
-
-
-def emojify_voice(voice):
-    language = get_language_from_voice(voice)
-    if language in LANGUAGE_TO_FLAG:
-        return LANGUAGE_TO_FLAG[language] + " " + voice
-    return voice
-
-
-def deemojify_voice(voice):
-    if voice[:2] in LANGUAGE_TO_FLAG.values():
-        return voice[3:]
-    return voice
+book = None
 
 
 def start_gui():
@@ -85,11 +24,19 @@ def start_gui():
     root.geometry('1200x900')
     root.resizable(False, False)
 
+    # check ffmpeg is installed
+    if not shutil.which('ffmpeg'):
+        messagebox.showwarning("Warning",
+                               "ffmpeg not found. Please install ffmpeg to" +
+                               " create mp3 and m4b audiobook files.")
+        exit(1)
+
     voice_frame = tk.Frame(root)
     voice_frame.pack(pady=5, padx=5)
 
     # add a scale to set speed
-    speed_label = tk.Label(voice_frame, text="Reading speed:", font=('Arial', 12))
+    speed_label = tk.Label(voice_frame, text="Reading speed:",
+                           font=('Arial', 12))
     speed_label.pack(side=tk.LEFT, pady=5, padx=5)
 
     def check_speed_range(event=None):
@@ -122,22 +69,20 @@ def start_gui():
         variable=gpu_acceleration,
         font=('Arial', 12)
     )
-    mac_os = sys.platform == 'darwin'
-    if not mac_os:
+
+    if get_gpu_acceleration_available():
         gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=5)
     
     # add a combo box with voice options
-    voice_label = tk.Label(voice_frame, text="Select Voice:", font=('Arial', 12))
+    voice_label = tk.Label(voice_frame, text="Select Voice:",
+                           font=('Arial', 12))
     voice_label.pack(side=tk.LEFT, pady=5, padx=5)
 
     # add a combo box with voice options
-    from voices import voices
     # filter out the non-english voices (not working yet)
-    voices = [ x for x in voices if x.startswith("a") or x.startswith("b")]
-    voices = [emojify_voice(x) for x in voices]
     voice_combo = ttk.Combobox(
         voice_frame,
-        values=voices,
+        values=voices_emojified,
         state="readonly",
         font=('Arial', 12)
     )
@@ -152,30 +97,6 @@ def start_gui():
     cover_image = ImageTk.PhotoImage(pil_image)  # or use a default image
     cover_label = tk.Label(root, image=cover_image)
     chapters = []
-
-    def resized_image(item):
-        image_data = item.get_content()
-        image = Image.open(io.BytesIO(image_data))
-        image.thumbnail((200, 300))
-        ratio = min(200/image.width, 300/image.height)
-        new_size = (int(image.width * ratio), int(image.height * ratio))
-        # Resize with high-quality resampling
-        resized = image.resize(new_size, Image.Resampling.LANCZOS)
-        # Create new image with gray background
-        background = Image.new('RGB', (200, 300), 'gray')
-        # Paste resized image centered
-        offset = ((200 - new_size[0])//2, (300 - new_size[1])//2)
-        background.paste(resized, offset)
-        return ImageTk.PhotoImage(background)
-
-    def get_cover_image(book):
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_COVER:
-                return resized_image(item)
-            if item.get_type() == ebooklib.ITEM_IMAGE:
-                if 'cover' in item.get_name().lower():
-                    return resized_image(item)
-        return None
     
     def get_limited_text(text):
         max_length = 25  # limit to 25 words
@@ -213,8 +134,21 @@ def start_gui():
         soundfile.write("temp.wav", final_audio, sample_rate)
         pygame.mixer.music.load("temp.wav")
         pygame.mixer.music.play()
+
+        def check_sound_end():
+            if not pygame.mixer.music.get_busy() and playing_sample:
+                on_playback_complete(play_label)
+            else:
+                root.after(100, check_sound_end)
+        
+        check_sound_end()
     
     def add_chapters_to_checkbox_frame():
+        # remove first
+        for widget in checkbox_frame.winfo_children():
+            widget.destroy()
+        checkbox_vars.clear()
+
         for chapter in chapters:
             var = tk.BooleanVar()
 
@@ -263,11 +197,6 @@ def start_gui():
             play_label.bind("<Button-1>",
                             lambda e, ch=chapter, pl=play_label:
                             handle_chapter_click(ch, pl))
-    
-    def remove_chapters_from_checkbox_frame():
-        for widget in checkbox_frame.winfo_children():
-            widget.destroy()
-        checkbox_vars.clear()
 
     def select_file():
         file_path = filedialog.askopenfilename(
@@ -276,24 +205,19 @@ def start_gui():
         )
         if file_path:
             file_label.config(text=file_path)
-            book = ebooklib.epub.read_epub(file_path)
-            cover_image_from_book = get_cover_image(book)
-            if cover_image_from_book:
-                cover_label.image = cover_image_from_book
-                cover_label.configure(image=cover_image_from_book)
+            global book
+            book, chapters_from_book, book_cover = get_book(file_path, True)
+            if book_cover:
+                cover_label.image = book_cover
+                cover_label.configure(image=book_cover)
             else:
                 cover_label.image = cover_image
                 cover_label.configure(image=cover_image)
             
             # set chapters
             chapters.clear()
-            chapters_from_book = find_document_chapters_and_extract_texts(book)
-            remove_chapters_from_checkbox_frame()
-            for item in chapters_from_book:
-                if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    chapters.append(item)
+            chapters.extend(chapters_from_book)
             add_chapters_to_checkbox_frame()
-            
     
     def convert():
         def enable_controls():
@@ -302,12 +226,49 @@ def start_gui():
         
         def run_conversion():
             try:
-                chapters_selected = [chapter for chapter, var in checkbox_vars.items() if var.get()]
-                enable_gpu = gpu_acceleration.get()
-                main(file_path, voice, float(speed), chapters_selected, enable_gpu)
+                chapters_selected = [chapter
+                                     for chapter, var in checkbox_vars.items()
+                                     if var.get()]
+                set_gpu_acceleration(gpu_acceleration.get())
+                filename = Path(file_path).name
+                title_metadata = book.get_metadata('DC', 'title')
+                creator_metadata = book.get_metadata('DC', 'creator')
+                title = title_metadata[0][0] if title_metadata else ''
+                creator = creator_metadata[0][0] if creator_metadata else ''
+                steps = len(chapters_selected) + 2
+                current_step = 1
+                
+                wav_files = []
+                for i, chapter in enumerate(chapters_selected, start=1):
+                    text = chapter.extracted_text
+                    if i == 1:
+                        text = f"{title} by {creator}.\n{text}"
+                    wav_filename = f"{filename.replace('.epub',
+                                                       f'_chapter_{i}.wav')}"
+                    progress_label.config(text=f"Converting chapter {i} of {
+                                                 len(chapters_selected)}")
+                    if convert_text_to_wav_file(text, voice,
+                                                speed, wav_filename):
+                        wav_files.append(wav_filename)
+                    current_step += 1
+                    progress['value'] = (current_step / steps) * 100
+                
+                if not wav_files:
+                    messagebox.showerror("Error",
+                                         "No chapters were selected.")
+
+                progress_label.config(text="Creating index file")
+                create_index_file(title, creator, wav_files)
+                current_step += 1
+                progress['value'] = (current_step / steps) * 100
+                progress_label.config(text="Creating m4b file")
+                cover_image_full = get_cover_image(book, False)
+                create_m4b(wav_files, filename, cover_image_full)
+                progress_label.config(text="Conversion complete")
             finally:
                 # Ensure controls are re-enabled even if an error occurs
                 root.after(0, enable_controls)
+                progress['value'] = 0
         
         if not check_speed_range():
             warning = "Please enter a speed value between 0.5 and 2.0."
@@ -316,11 +277,6 @@ def start_gui():
             messagebox.showwarning("Warning", warning)
 
         if file_label.cget("text"):
-            output_text.configure(state='normal')
-            output_text.delete(1.0, tk.END)
-            output_text.configure(state='disabled')
-            # Redirect stdout to Text widget
-            sys.stdout = TextRedirector(output_text)
             file_path = file_label.cget("text")
             voice = deemojify_voice(voice_combo.get())
             speed = speed_entry.get()
@@ -351,7 +307,7 @@ def start_gui():
     file_label = tk.Label(file_frame, text="")
     file_label.pack(side=tk.LEFT, pady=5)
 
-    cover_label.image = cover_image  # Keep a reference to prevent garbage collection
+    cover_label.image = cover_image  # Keep a reference to prevent GC
     cover_label.pack(pady=10)
 
     # Create main container frame
@@ -360,7 +316,8 @@ def start_gui():
     
     # Create canvas and scrollbar
     canvas = tk.Canvas(container)
-    scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    scrollbar = ttk.Scrollbar(container, orient="vertical",
+                              command=canvas.yview)
     
     # Create frame for checkboxes inside canvas
     checkbox_frame = tk.Frame(canvas)
@@ -390,14 +347,26 @@ def start_gui():
     )
     start_convert_button.pack(pady=20)
 
-    output_text = tk.Text(root, height=10, width=50, bg="black", fg="white", font=('Arial', 12))
-    output_text.pack(pady=20, padx=20, fill=tk.BOTH, expand=True)
-    output_text.tag_configure("red", foreground="white")
-    output_text.insert(tk.END, "Output here....", "red")
-    output_text.configure(state='disabled')
+    # add a progress bar
+    progress_frame = tk.Frame(root)
+    progress_frame.pack(pady=5)
+    progress = ttk.Progressbar(progress_frame, orient="horizontal",
+                               length=200, mode="determinate")
+    progress.pack(pady=20)
+
+    progress_label = tk.Label(progress_frame,
+                              text="Conversion Progress",
+                              font=('Arial', 12))
+    progress_label.pack(pady=5)
 
     # start main loop
     root.mainloop()
+
+
+def on_playback_complete(play_label):
+    global playing_sample
+    playing_sample = False
+    play_label.config(text="▶️")
 
 
 if __name__ == "__main__":

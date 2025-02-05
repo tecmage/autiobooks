@@ -1,122 +1,56 @@
 
-import time
-import shutil
 import subprocess
 import numpy as np
 import soundfile
 import ebooklib
-import warnings
-import re
+from ebooklib import epub
 import torch
+import io
 from pathlib import Path
-from string import Formatter
 from bs4 import BeautifulSoup
 from kokoro import KPipeline
-from ebooklib import epub
 from pydub import AudioSegment
 from tempfile import NamedTemporaryFile
+from PIL import Image, ImageTk
 
 
-sample_rate = 24000
+SAMPLE_RATE = 24000
 
 
-def main(file_path, voice, speed, chapters_by_name, gpu_acceleration):
-
-    if gpu_acceleration:
+def set_gpu_acceleration(enabled):
+    if enabled:
         if torch.cuda.is_available():
             print('CUDA GPU available')
             torch.set_default_device('cuda')
         else:
             print('CUDA GPU not available. Defaulting to CPU')
 
-    filename = Path(file_path).name
-    warnings.simplefilter("ignore")
-    book = epub.read_epub(file_path)
-    meta_title = book.get_metadata('DC', 'title')
-    title = meta_title[0][0] if meta_title else ''
-    meta_creator = book.get_metadata('DC', 'creator')
-    by_creator = 'by ' + meta_creator[0][0] if meta_creator else ''
 
-    cover_maybe = [c for c in book.get_items() if c.get_type() == ebooklib.ITEM_COVER]
-    cover_image = cover_maybe[0].get_content() if cover_maybe else b""
-    if cover_maybe:
-        print(f'Found cover image {cover_maybe[0].file_name} in {cover_maybe[0].media_type} format')
-
-    intro = f'{title} {by_creator}'
-    print(intro)
-    print('Found Chapters:', [c.get_name() for c in book.get_items() if c.get_type() == ebooklib.ITEM_DOCUMENT])
-
-    document_chapters = find_document_chapters_and_extract_texts(book)
-
-    chapters = []
-    for chapter_by_name in chapters_by_name:
-        for item in document_chapters:
-            if item.get_name() == chapter_by_name:
-                chapters.append(item)
-                break
-
-    texts = [c.extracted_text for c in chapters]
-
-    has_ffmpeg = shutil.which('ffmpeg') is not None
-    if not has_ffmpeg:
-        print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
-
-    total_chars, processed_chars = sum(map(len, texts)), 0
-    print('Started at:', time.strftime('%H:%M:%S'))
-    print(f'Total characters: {total_chars:,}')
-    print('Total words:', len(' '.join(texts).split()))
-    chars_per_sec = 500 if torch.cuda.is_available() else 50
-    print(f'Estimated time remaining (assuming {chars_per_sec} chars/sec): {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
-
-    chapter_mp3_files = []
-    for i, text in enumerate(texts, start=1):
-        chapter_filename = filename.replace('.epub', f'_chapter_{i}.wav')
-        chapter_mp3_files.append(chapter_filename)
-        if Path(chapter_filename).exists():
-            print(f'File for chapter {i} already exists. Skipping')
-            continue
-        if len(text.strip()) < 10:
-            print(f'Skipping empty chapter {i}')
-            chapter_mp3_files.remove(chapter_filename)
-            continue
-        print(f'Reading chapter {i} ({len(text):,} characters)...')
-        if i == 1:
-            text = intro + '.\n\n' + text
-        start_time = time.time()
-
-        audio_segments = gen_audio_segments(text, voice, speed)
-        if audio_segments:
-            final_audio = np.concatenate(audio_segments)
-            soundfile.write(chapter_filename, final_audio, sample_rate)
-            end_time = time.time()
-            delta_seconds = end_time - start_time
-            chars_per_sec = len(text) / delta_seconds
-            processed_chars += len(text)
-            print(f'Estimated time remaining: {strfdelta((total_chars - processed_chars) / chars_per_sec)}')
-            print('Chapter written to', chapter_filename)
-            print(f'Chapter {i} read in {delta_seconds:.2f} seconds ({chars_per_sec:.0f} characters per second)')
-            progress = processed_chars * 100 // total_chars
-            print('Progress:', f'{progress}%\n')
-        else:
-            print(f'Warning: No audio generated for chapter {i}')
-            chapter_mp3_files.remove(chapter_filename)
-
-    if has_ffmpeg:
-        create_index_file(title, by_creator, chapter_mp3_files)
-        create_m4b(chapter_mp3_files, filename, cover_image)
+def get_gpu_acceleration_available():
+    return torch.cuda.is_available()
 
 
 def gen_audio_segments(text, voice, speed, split_pattern=r'\n+'):
-    pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
+    # a for american or b for british etc.
+    pipeline = KPipeline(lang_code=voice[0])
     audio_segments = []
+    speed = float(speed)
     for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
                                   split_pattern=split_pattern):
         audio_segments.append(audio)
     return audio_segments
 
 
+def get_book(file_path, resized):
+    book = epub.read_epub(file_path)
+    chapters = find_document_chapters_and_extract_texts(book)
+    cover_image = get_cover_image(book, resized=resized)
+    return (book, chapters, cover_image)
+
+
 def find_document_chapters_and_extract_texts(book):
-    """Returns every chapter that is an ITEM_DOCUMENT and enriches each chapter with extracted_text."""
+    """Returns every chapter that is an ITEM_DOCUMENT
+    and enriches each chapter with extracted_text."""
     document_chapters = []
     for chapter in book.get_items():
         if chapter.get_type() != ebooklib.ITEM_DOCUMENT:
@@ -134,43 +68,6 @@ def find_document_chapters_and_extract_texts(book):
     return document_chapters
 
 
-def is_chapter(c):
-    name = c.get_name().lower()
-    has_min_len = len(c.get_body_content()) > 100
-    title_looks_like_chapter = bool(
-        'chapter' in name.lower()
-        or re.search(r'part\d{1,3}', name)
-        or re.search(r'ch\d{1,3}', name)
-        or re.search(r'chap\d{1,3}', name)
-    )
-    return has_min_len and title_looks_like_chapter
-
-
-def find_chapters(document_chapters, verbose=False):
-    chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT and is_chapter(c)]
-    if verbose:
-        for item in chapters:
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                print(f"'{item.get_name()}'" + ', #' + str(len(item.get_body_content())))
-    if len(chapters) == 0:
-        print('Not easy to find the chapters, defaulting to all available documents.')
-        chapters = [c for c in document_chapters if c.get_type() == ebooklib.ITEM_DOCUMENT]
-    return chapters
-
-
-def strfdelta(tdelta, fmt='{D:02}d {H:02}h {M:02}m {S:02}s'):
-    remainder = int(tdelta)
-    f = Formatter()
-    desired_fields = [field_tuple[1] for field_tuple in f.parse(fmt)]
-    possible_fields = ('W', 'D', 'H', 'M', 'S')
-    constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
-    values = {}
-    for field in possible_fields:
-        if field in desired_fields and field in constants:
-            values[field], remainder = divmod(remainder, constants[field])
-    return f.format(fmt, **values)
-
-
 def create_m4b(chapter_files, filename, cover_image):
     tmp_filename = filename.replace('.epub', '.tmp.mp4')
     if not Path(tmp_filename).exists():
@@ -178,15 +75,17 @@ def create_m4b(chapter_files, filename, cover_image):
         for wav_file in chapter_files:
             audio = AudioSegment.from_wav(wav_file)
             combined_audio += audio
-        print('Converting to Mp4...')
-        combined_audio.export(tmp_filename, format="mp4", codec="aac", bitrate="64k")
+
+        combined_audio.export(tmp_filename, format="mp4", codec="aac",
+                              bitrate="64k")
     final_filename = filename.replace('.epub', '.m4b')
-    print('Creating M4B file...')
 
     if cover_image:
         cover_image_file = NamedTemporaryFile("wb")
         cover_image_file.write(cover_image)
-        cover_image_args = ["-i", cover_image_file.name, "-map", "0:a", "-map", "2:v"]
+        cover_image_args = ["-i", cover_image_file.name,
+                            "-map", "0:a",
+                            "-map", "2:v"]
     else:
         cover_image_args = []
 
@@ -194,6 +93,7 @@ def create_m4b(chapter_files, filename, cover_image):
         'ffmpeg',
         '-i', f'{tmp_filename}',
         '-i', 'chapters.txt',
+        '-y',
         *cover_image_args,
         '-map', '0',
         '-map_metadata', '1',
@@ -205,13 +105,11 @@ def create_m4b(chapter_files, filename, cover_image):
         f'{final_filename}'
     ])
     Path(tmp_filename).unlink()
-    if proc.returncode == 0:
-        print(f'{final_filename} created. Enjoy your audiobook.')
-        print('Feel free to delete the intermediary .wav chapter files, the .m4b is all you need.')
 
 
 def probe_duration(file_name):
-    args = ['ffprobe', '-i', file_name, '-show_entries', 'format=duration', '-v', 'quiet', '-of', 'default=noprint_wrappers=1:nokey=1']
+    args = ['ffprobe', '-i', file_name, '-show_entries', 'format=duration',
+            '-v', 'quiet', '-of', 'default=noprint_wrappers=1:nokey=1']
     proc = subprocess.run(args, capture_output=True, text=True, check=True)
     return float(proc.stdout.strip())
 
@@ -224,6 +122,51 @@ def create_index_file(title, creator, chapter_mp3_files):
         for c in chapter_mp3_files:
             duration = probe_duration(c)
             end = start + (int)(duration * 1000)
-            f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}\ntitle=Chapter {i}\n\n")
+            f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}" +
+                    "\ntitle=Chapter {i}\n\n")
             i += 1
             start = end
+
+
+def resized_image(item):
+    image_data = item.get_content()
+    image = Image.open(io.BytesIO(image_data))
+    image.thumbnail((200, 300))
+    ratio = min(200/image.width, 300/image.height)
+    new_size = (int(image.width * ratio), int(image.height * ratio))
+    # Resize with high-quality resampling
+    resized = image.resize(new_size, Image.Resampling.LANCZOS)
+    # Create new image with gray background
+    background = Image.new('RGB', (200, 300), 'gray')
+    # Paste resized image centered
+    offset = ((200 - new_size[0])//2, (300 - new_size[1])//2)
+    background.paste(resized, offset)
+    return ImageTk.PhotoImage(background)
+
+
+def get_cover_image(book, resized):
+    for item in book.get_items():
+        if item.get_type() == ebooklib.ITEM_COVER:
+            if resized:
+                return resized_image(item)
+            else:
+                return item.get_content()
+        if item.get_type() == ebooklib.ITEM_IMAGE:
+            if 'cover' in item.get_name().lower():
+                if resized:
+                    return resized_image(item)
+                else:
+                    return item.get_content()
+    return None
+
+
+def convert_text_to_wav_file(text, voice, speed, filename,
+                             split_pattern=r'\n\n\n'):
+    if Path(filename).exists():
+        Path(filename).unlink()
+    audio = gen_audio_segments(text, voice, speed, split_pattern)
+    if audio:
+        audio = np.concatenate(audio)
+        soundfile.write(filename, audio, SAMPLE_RATE)
+    else:
+        return None
