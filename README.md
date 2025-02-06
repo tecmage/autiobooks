@@ -5,18 +5,30 @@
 
 Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokoro's high-quality speech synthesis.
 
-[Kokoro v0.19](https://huggingface.co/hexgrad/Kokoro-82M) is a recently published text-to-speech model with just 82M params and very natural sounding output.
-It's released under Apache licence and it was trained on < 100 hours of audio.
-It currently supports American, British English, French, Korean, Japanese and Mandarin, and a bunch of very good voices.
+
+
+[Kokoro v0.19](https://huggingface.co/hexgrad/Kokoro-82M) Kokoro is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
+
+It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different voices with different accents and prosody.
 
 ## How to install and run
 
 If you have Python 3 on your computer, you can install it with pip.
 Be aware that it won't work with Python 3.13.
-Then you also need to download a couple of additional files in the same folder, which are about ~360MB:
 
 ```bash
 pip install autiobooks
+```
+
+You will require `ffmpeg` and `tkinter` installed:
+
+Linux:
+```bash
+sudo apt install ffmpeg python3-tkinter
+```
+MacOS:
+```bash
+brew install ffmpeg python3-tkinter
 ```
 
 To start the program, run:
@@ -25,11 +37,8 @@ To start the program, run:
 autiobooks
 ```
 
-It will first create a bunch of `book_chapter_1.wav`, `book_chapter_2.wav`, etc. files in the same directory,
-and at the end it will produce a `book.m4b` file with the whole book you can listen with VLC or any
- audiobook player.
-It will only produce the `.m4b` file if you have `ffmpeg` installed on your machine.
+The program creates .wav files for each chapter, then combines them into a .m4b file for playing using an audiobook player.
 
 ## Author
 by David Nesbitt, distributed under MIT license. Check out the excellent project [audiblez](https://github.com/santinic/audiblez) if you'd prefer a
-command-line interface. This project uses some code from the project but has diverged.
+command-line interface.
