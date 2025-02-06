@@ -11,6 +11,8 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different voices with different accents and prosody.
 
+PRs are welcome!
+
 ## How to install and run
 
 If you have Python 3 on your computer, you can install it with pip.
