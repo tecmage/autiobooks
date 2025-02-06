@@ -7,7 +7,7 @@ from pathlib import Path
 from engine import get_gpu_acceleration_available, gen_audio_segments
 from engine import set_gpu_acceleration, convert_text_to_wav_file
 from engine import create_index_file, create_m4b, get_cover_image
-from engine import get_book
+from engine import get_book, get_title, get_author
 import pygame.mixer
 import soundfile
 import numpy as np
@@ -59,7 +59,7 @@ def start_gui():
         font=('Arial', 12)
     )
     speed_entry.insert(0, "1.0")
-    speed_entry.pack(side=tk.LEFT, pady=5, padx=5)
+    speed_entry.pack(side=tk.LEFT, pady=5, padx=15)
     speed_entry.bind('<KeyRelease>', check_speed_range)
 
     # add a tickbox to enable/disable GPU acceleration
@@ -73,7 +73,7 @@ def start_gui():
     )
 
     if get_gpu_acceleration_available():
-        gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=5)
+        gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
     
     # add a combo box with voice options
     voice_label = tk.Label(voice_frame, text="Select Voice:",
@@ -93,11 +93,15 @@ def start_gui():
     
     pygame.mixer.init()
     pygame.mixer.music.set_volume(0.7)
+
+    book_frame = tk.Frame(root)
+    book_frame.grid_columnconfigure(0, weight=1)
+    book_frame.grid_columnconfigure(1, weight=4)
     
     # ui element variables
     pil_image = Image.new('RGB', (200, 300), 'gray')
     cover_image = ImageTk.PhotoImage(pil_image)  # or use a default image
-    cover_label = tk.Label(root, image=cover_image)
+    cover_label = tk.Label(book_frame, image=cover_image)
     chapters = []
     
     def get_limited_text(text):
@@ -213,6 +217,8 @@ def start_gui():
             file_label.config(text=file_path)
             global book
             book, chapters_from_book, book_cover = get_book(file_path, True)
+            book_label.config(text=f"Title: {get_title(book)}")
+            author_label.config(text=f"Author: {get_author(book)}")
             if book_cover:
                 cover_label.image = book_cover
                 cover_label.configure(image=book_cover)
@@ -237,10 +243,8 @@ def start_gui():
                                      if var.get()]
                 set_gpu_acceleration(gpu_acceleration.get())
                 filename = Path(file_path).name
-                title_metadata = book.get_metadata('DC', 'title')
-                creator_metadata = book.get_metadata('DC', 'creator')
-                title = title_metadata[0][0] if title_metadata else ''
-                creator = creator_metadata[0][0] if creator_metadata else ''
+                title = get_title(book)
+                creator = get_author(book)
                 steps = len(chapters_selected) + 2
                 current_step = 1
                 
@@ -296,8 +300,8 @@ def start_gui():
             # create a warning message box to say this
             messagebox.showwarning("Warning", warning)
 
-    file_frame = tk.Frame(root)
-    file_frame.pack(pady=5)
+    file_frame = tk.Frame(book_frame)
+    file_frame.grid(row=0, column=1, pady=5, padx=10)
 
     file_button = tk.Button(
         file_frame,
@@ -307,13 +311,21 @@ def start_gui():
         fg='black',
         font=('Arial', 12)
     )
-    file_button.pack(side=tk.LEFT, pady=5, padx=5)
+    file_button.grid(row=0, column=0, pady=5)
 
     file_label = tk.Label(file_frame, text="")
-    file_label.pack(side=tk.LEFT, pady=5)
+    file_label.grid(row=1, column=0, pady=5)
+
+    book_label = tk.Label(file_frame, text="Title: ", font=('Arial', 12))
+    book_label.grid(row=2, column=0, pady=5)
+
+    author_label = tk.Label(file_frame, text="Author: ", font=('Arial', 12))
+    author_label.grid(row=3, column=0, pady=5)
 
     cover_label.image = cover_image  # Keep a reference to prevent GC
-    cover_label.pack(pady=10)
+    cover_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+
+    book_frame.pack(pady=5, fill=tk.X)
 
     # Create main container frame
     container = tk.Frame(root)
@@ -350,7 +362,7 @@ def start_gui():
         fg='black',
         font=('Arial', 12)
     )
-    start_convert_button.pack(pady=20)
+    start_convert_button.pack(pady=5)
 
     # add a progress bar
     progress_frame = tk.Frame(root)

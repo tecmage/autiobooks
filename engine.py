@@ -170,3 +170,15 @@ def convert_text_to_wav_file(text, voice, speed, filename,
         soundfile.write(filename, audio, SAMPLE_RATE)
         return True
     return False
+
+
+def get_title(book):
+    title_metadata = book.get_metadata('DC', 'title')
+    title = title_metadata[0][0] if title_metadata else ''
+    return title
+
+
+def get_author(book):
+    creator_metadata = book.get_metadata('DC', 'creator')
+    creator = creator_metadata[0][0] if creator_metadata else ''
+    return creator
