@@ -24,7 +24,7 @@ def start_gui():
     window_width = 1000
     window_height = 900
     root.geometry(f"{window_width}x{window_height}")
-    root.resizable(False, False)
+    root.resizable(True, True)
 
     # check ffmpeg is installed
     if not shutil.which('ffmpeg'):
