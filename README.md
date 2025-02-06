@@ -5,7 +5,7 @@
 
 Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokoro's high-quality speech synthesis.
 
-
+![Demo of Autiobooks in action](rec.gif)
 
 [Kokoro v0.19](https://huggingface.co/hexgrad/Kokoro-82M) Kokoro is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
