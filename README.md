@@ -7,7 +7,7 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 ![Demo of Autiobooks in action](rec.gif)
 
-[Kokoro v0.19](https://huggingface.co/hexgrad/Kokoro-82M) Kokoro is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
+[Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
 It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different voices with different accents and prosody.
 
