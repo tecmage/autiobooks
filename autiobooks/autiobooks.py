@@ -4,15 +4,15 @@ import sys
 import threading
 from PIL import Image, ImageTk
 from pathlib import Path
-from engine import get_gpu_acceleration_available, gen_audio_segments
-from engine import set_gpu_acceleration, convert_text_to_wav_file
-from engine import create_index_file, create_m4b, get_cover_image
-from engine import get_book, get_title, get_author
+from .engine import get_gpu_acceleration_available, gen_audio_segments
+from .engine import set_gpu_acceleration, convert_text_to_wav_file
+from .engine import create_index_file, create_m4b, get_cover_image
+from .engine import get_book, get_title, get_author
 import pygame.mixer
 import soundfile
 import numpy as np
 import shutil
-from voices_lang import voices, voices_emojified, deemojify_voice
+from .voices_lang import voices, voices_emojified, deemojify_voice
 
 playing_sample = False
 book = None
