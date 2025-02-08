@@ -1,6 +1,6 @@
 [project]
 name = "autiobooks"
-version = "1.0.3"
+version = "1.0.4"
 description = "Automatically convert epubs to audiobooks"
 
 readme = "README.md"

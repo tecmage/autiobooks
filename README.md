@@ -15,16 +15,20 @@ PRs are welcome!
 
 ## Changelog
 
-#### 1.0.1
-Initial release
-
-#### 1.0.2
-Window can be resized
+#### 1.0.4
+- Fix pip installs
 
 #### 1.0.3
 - Fix bug causing errors on some linux installs
 - Read epub files with chapters not marked as ITEM_DOCUMENT
 - Select all chapters if none are selected
+
+#### 1.0.2
+- Window can be resized
+
+#### 1.0.1
+- Initial release
+
 
 ## How to install and run
 
@@ -53,7 +57,7 @@ brew install ffmpeg python-tk
 To start the program, run:
 
 ```bash
-autiobooks
+python3 -m autiobooks
 ```
 
 The program creates .wav files for each chapter, then combines them into a .m4b file for playing using an audiobook player.
