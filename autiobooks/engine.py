@@ -153,7 +153,7 @@ def create_index_file(title, creator, chapter_mp3_files):
             duration = probe_duration(c)
             end = start + (int)(duration * 1000)
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}" +
-                    "\ntitle=Chapter {i}\n\n")
+                    f"\ntitle=Chapter {i}\n\n")
             i += 1
             start = end
 
