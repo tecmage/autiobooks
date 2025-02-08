@@ -15,7 +15,7 @@ PRs are welcome!
 
 ## Changelog
 
-#### 1.0.4
+#### 1.0.5
 - Fix pip installs
 
 #### 1.0.3
