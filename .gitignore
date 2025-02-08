@@ -6,9 +6,8 @@ gene
 *.epub
 *.m4b
 *.sh
-*.json
-*.onnx
 dist
+build
 *.egg-info
 *.txt
 .DS_Store
