@@ -389,9 +389,13 @@ def on_playback_complete(play_label):
     play_label.config(text="▶️")
 
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) == 2 and sys.argv[1] == '--help':
         # print README.md
         print(open('README.md').read())
     else:
         start_gui()
+
+
+if __name__ == "__main__":
+    main()
