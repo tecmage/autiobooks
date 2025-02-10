@@ -100,7 +100,13 @@ def find_document_chapters_and_extract_texts(book):
 
 
 def convert_wav_to_m4a(wav_file_path, m4a_file_path):
-    subprocess.run(['ffmpeg', '-i', wav_file_path, '-c:a', 'aac', '-b:a', '64k', m4a_file_path])
+    subprocess.run([
+        'ffmpeg',
+        '-i', wav_file_path,
+        '-c:a', 'aac',
+        '-b:a', '64k',
+        m4a_file_path
+    ])
 
 
 def create_m4b(chapter_files, filename, cover_image):
@@ -123,11 +129,23 @@ def create_m4b(chapter_files, filename, cover_image):
         if cover_image:
             cover_image_file = NamedTemporaryFile("wb")
             cover_image_file.write(cover_image)
-            cover_image_args = ["-i", cover_image_file.name, '-disposition:v', 'attached_pic']
+            cover_image_args = [
+                "-i", cover_image_file.name, 
+                '-disposition:v', 'attached_pic'
+            ]
 
         # Merge all the converted m4a files into one big file (no encoding needed)
         final_filename = filename.replace('.epub', '.m4b')
-        subprocess.run(['ffmpeg', '-safe', '0', '-f', 'concat', '-i', concat_file, '-i', 'chapters.txt', *cover_image_args, '-c', 'copy', final_filename])
+        subprocess.run([
+            'ffmpeg',
+            '-safe', '0',
+            '-f', 'concat',
+            '-i', concat_file,
+            '-i', 'chapters.txt',
+            *cover_image_args,
+            '-c', 'copy',
+            final_filename
+        ])
 
 
 def probe_duration(file_name):
