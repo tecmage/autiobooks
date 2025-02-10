@@ -15,6 +15,10 @@ PRs are welcome!
 
 ## Changelog
 
+#### 1.0.6
+
+- Fix chapter index - @tomhense
+
 #### 1.0.5
 - Fix pip installs
 
@@ -63,5 +67,4 @@ python3 -m autiobooks
 The program creates .wav files for each chapter, then combines them into a .m4b file for playing using an audiobook player.
 
 ## Author
-by David Nesbitt, distributed under MIT license. Check out the excellent project [audiblez](https://github.com/santinic/audiblez) if you'd prefer a
-command-line interface.
+by David Nesbitt, distributed under MIT license.
