@@ -15,6 +15,11 @@ PRs are welcome!
 
 ## Changelog
 
+#### 1.0.8
+
+- Fix issue with output file containing multiple audio stream [10](https://github.com/plusuncold/autiobooks/issues/10) - @tomhense
+- Add an entrypoint for pipx - @tomhense
+
 #### 1.0.7
 
 - Uptick kokoro package
