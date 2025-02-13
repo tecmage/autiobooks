@@ -9,11 +9,15 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
-It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different voices with different accents and prosody.
+It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody.
 
 PRs are welcome!
 
 ## Changelog
+
+#### 1.0.7
+
+- Uptick kokoro package
 
 #### 1.0.6
 
@@ -57,6 +61,8 @@ MacOS:
 ```bash
 brew install ffmpeg python-tk
 ```
+
+Also recommended is `espeak-ng` for better processing of unknown words.
 
 To start the program, run:
 
