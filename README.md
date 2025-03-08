@@ -15,6 +15,10 @@ PRs are welcome!
 
 ## Changelog
 
+#### 1.1.0 
+
+- Fix race condition - @Thabian
+
 #### 1.0.9
 
 - Fix issue with output file containing multiple audio stream [10](https://github.com/plusuncold/autiobooks/issues/10) - @tomhense
