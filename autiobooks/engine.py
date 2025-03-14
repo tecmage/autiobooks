@@ -159,6 +159,7 @@ def create_m4b(chapter_files, filename, cover_image):
             '-i', concat_file,
             '-i', 'chapters.txt',
             *cover_image_args,
+            '-map_metadata','1',
             '-c', 'copy',
             final_filename
         ], check=True)
