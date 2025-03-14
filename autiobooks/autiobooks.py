@@ -115,6 +115,14 @@ def start_gui():
             playing_sample = False
             play_label.config(text="▶️")
             return
+
+    def select_all():
+        for chapter, var in checkbox_vars.items():
+            var.set(True)
+        
+    def clear_all():
+        for chapter, var in checkbox_vars.items():
+            var.set(False)
         
         text = get_limited_text(chapter.extracted_text)
         if not text:
@@ -352,7 +360,27 @@ def start_gui():
     
     # Dictionary to store checkbox variables
     checkbox_vars = {}
-
+    
+    select_all_button = tk.Button(
+        root,
+        text='Select All Chapters',
+        command=select_all,
+        bg='white',
+        fg='black',
+        font=('Arial', 12)
+    )
+    select_all_button.pack(pady=5)
+    
+    clear_all_button = tk.Button(
+        root,
+        text='Clear All Chapters',
+        command=clear_all,
+        bg='white',
+        fg='black',
+        font=('Arial', 12)
+    )
+    clear_all_button.pack(pady=5)
+    
     start_convert_button = tk.Button(
         root,
         text='Convert epub',
