@@ -107,6 +107,14 @@ def start_gui():
         if len(words) > max_length:
             return ' '.join(words[:max_length])
         return text
+
+    def select_all():
+        for chapter, var in checkbox_vars.items():
+            var.set(True)
+        
+    def clear_all():
+        for chapter, var in checkbox_vars.items():
+            var.set(False)
     
     def handle_chapter_click(chapter, play_label):
         global playing_sample
@@ -116,14 +124,6 @@ def start_gui():
             play_label.config(text="▶️")
             return
 
-    def select_all():
-        for chapter, var in checkbox_vars.items():
-            var.set(True)
-        
-    def clear_all():
-        for chapter, var in checkbox_vars.items():
-            var.set(False)
-        
         text = get_limited_text(chapter.extracted_text)
         if not text:
             return
