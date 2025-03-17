@@ -172,11 +172,12 @@ def probe_duration(file_name):
     return float(proc.stdout.strip())
 
 
-def create_index_file(title, creator, chapter_mp3_files):
+def create_index_file(title, creator, chapter_mp3_files, chapter_num):
     with open("chapters.txt", "w") as f:
         f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\n\n")
         start = 0
-        i = 1
+        chapter_num = int(chapter_num)
+        i = chapter_num
         for c in chapter_mp3_files:
             duration = probe_duration(c)
             end = start + (int)(duration * 1000)
