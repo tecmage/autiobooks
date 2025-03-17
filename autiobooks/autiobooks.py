@@ -58,7 +58,7 @@ def start_gui():
         width=5
     )
     speed_entry.insert(0, "1.0")
-    speed_entry.pack(side=tk.LEFT, pady=5, padx=15)
+    speed_entry.pack(side=tk.LEFT, pady=10, padx=15)
     speed_entry.bind('<KeyRelease>', check_speed_range)
 
     # add a tickbox to enable/disable GPU acceleration
@@ -252,6 +252,7 @@ def start_gui():
                     chapters_selected = chapters
                 set_gpu_acceleration(gpu_acceleration.get())
                 filename = Path(file_path).name
+                chapter_num = int(chapter_entry.get())
                 title = get_title(book)
                 creator = get_author(book)
                 steps = len(chapters_selected) + 2
@@ -275,7 +276,7 @@ def start_gui():
                                          "No chapters were converted.")
 
                 progress_label.config(text="Creating index file")
-                create_index_file(title, creator, wav_files)
+                create_index_file(title, creator, wav_files, chapter_num)
                 current_step += 1
                 progress['value'] = (current_step / steps) * 100
                 progress_label.config(text="Creating m4b file")
@@ -380,6 +381,29 @@ def start_gui():
         font=('Arial', 12)
     )
     clear_all_button.pack(pady=5)
+    
+    chapter_label = tk.Label(text="Starting Chapter:")
+    chapter_label.pack(pady=5, padx=5)
+
+    def check_chapter_range(event=None):
+        try:
+            value = int(chapter_entry.get())
+            if 0 <= value <= 99999:
+                chapter_entry.configure(fg='white')
+                return True
+            else:
+                chapter_entry.configure(fg='red')
+        except ValueError:
+            chapter_entry.configure(fg='red')
+        return False
+
+    chapter_entry = tk.Entry(
+        width=5
+    )
+    chapter_entry.insert(0, "1")
+    chapter_entry.pack(padx=15)
+    chapter_entry.bind('<KeyRelease>', check_chapter_range)
+    
     
     start_convert_button = tk.Button(
         root,
