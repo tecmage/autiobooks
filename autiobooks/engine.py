@@ -174,7 +174,7 @@ def probe_duration(file_name):
 
 def create_index_file(title, creator, chapter_mp3_files, chapter_num):
     with open("chapters.txt", "w") as f:
-        f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\n\n")
+        f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\nalbum={title}\n\n")
         start = 0
         chapter_num = int(chapter_num)
         i = chapter_num
