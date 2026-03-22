@@ -49,37 +49,40 @@ PRs are welcome!
 
 ## How to install and run
 
-(Note that pip installs are currently not working - we are looking
-into the cause of this, but in the meantime, please download the 
-repo and run directly)
+Requires Python 3.10–3.12 (3.13 is not supported).
 
-If you have Python 3 on your computer, you can install it with pip.
-Be aware that it won't work with Python 3.13.
+### 1. Install system dependencies
 
+**Linux:**
 ```bash
-pip install autiobooks
+sudo apt install ffmpeg python3-tk espeak-ng
 ```
 
-You will require `ffmpeg` and `tkinter` installed:
-
-Linux:
+**macOS:**
 ```bash
-sudo apt install ffmpeg python3-tkinter
-```
-MacOS:
-```bash
-brew install ffmpeg python-tk
+brew install ffmpeg python-tk espeak-ng
 ```
 
-Also recommended is `espeak-ng` for better processing of unknown words.
+**Windows:**
+- Install [ffmpeg](https://ffmpeg.org/download.html) and add it to your PATH
+- tkinter is included with the standard Python installer
+- [espeak-ng](https://github.com/espeak-ng/espeak-ng/releases) is optional but recommended
 
-To start the program, run:
+### 2. Clone and install
 
 ```bash
-python3 -m autiobooks
+git clone https://github.com/plusuncold/autiobooks.git
+cd autiobooks
+pip install .
 ```
 
-The program creates .wav files for each chapter, then combines them into a .m4b file for playing using an audiobook player.
+### 3. Run
+
+```bash
+python -m autiobooks
+```
+
+The program creates `.wav` files for each chapter, then combines them into a `.m4b` file for playing using an audiobook player.
 
 ## Docker
 
@@ -115,7 +118,7 @@ DISPLAY=host.docker.internal:0 docker compose up --build
 
 ### GPU Acceleration
 
-If you have an NVIDIA GPU and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed, uncomment the `deploy` section in `docker-compose.yml` to enable CUDA acceleration.
+If you have an NVIDIA GPU and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed, the `deploy` section in `docker-compose.yml` enables CUDA acceleration. If you don't have a GPU, comment out or remove the `deploy` section to avoid errors.
 
 ### Volumes
 
