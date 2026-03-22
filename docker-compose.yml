@@ -12,13 +12,13 @@ services:
       # Mount a local directory for epub input / audiobook output
       - ./books:/books
     # GPU support (requires NVIDIA GPU + nvidia-container-toolkit)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    #deploy:
+      #resources:
+        #reservations:
+          #devices:
+            #- driver: nvidia
+              #count: 1
+              #capabilities: [gpu]
 
 volumes:
   autiobooks-config:
