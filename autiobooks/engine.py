@@ -1,18 +1,18 @@
-
 import subprocess
+import warnings
 import numpy as np
 import soundfile
-import ebooklib
-from ebooklib import epub
 import torch
-import io
 import os
 from pathlib import Path
-from bs4 import BeautifulSoup
 from kokoro import KPipeline
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from concurrent.futures import ThreadPoolExecutor
-from PIL import Image, ImageTk
+from text_processing import normalize_text
+
+# Suppress torch warnings from Kokoro's model internals
+warnings.filterwarnings('ignore', message='.*dropout option adds dropout.*')
+warnings.filterwarnings('ignore', category=FutureWarning, module='torch.nn.utils.weight_norm')
 
 
 SAMPLE_RATE = 24000
@@ -45,7 +45,9 @@ def create_pipeline(lang_code):
     finally:
         builtins.open = original_open
 
-def gen_audio_segments(text, voice, speed, split_pattern=r'\n+'):
+
+def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
+                       on_segment=None):
     # a for american or b for british etc.
     pipeline = create_pipeline(voice[0])
     audio_segments = []
@@ -53,55 +55,14 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+'):
     for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
                                   split_pattern=split_pattern):
         audio_segments.append(audio)
+        if on_segment:
+            on_segment(len(audio_segments))
     return audio_segments
-
-
-def get_book(file_path, resized):
-    book = epub.read_epub(file_path)
-    chapters = find_document_chapters_and_extract_texts(book)
-    cover_image = get_cover_image(book, resized=resized)
-    return (book, chapters, cover_image)
-
-
-def is_valid_chapter(chapter):
-    print(chapter.get_type())
-    if chapter.get_type() == ebooklib.ITEM_DOCUMENT:
-        return True
-    if chapter.get_type() == ebooklib.ITEM_UNKNOWN:
-        if chapter.media_type == 'text/html':
-            return True
-    return False
-
-
-def find_document_chapters_and_extract_texts(book):
-    """Returns every chapter that is an ITEM_DOCUMENT
-    and enriches each chapter with extracted_text."""
-    document_chapters = []
-    for chapter in book.get_items():
-        if not is_valid_chapter(chapter):
-            continue
-        try:
-            xml = chapter.get_body_content()
-        except:
-            try:
-                xml = chapter.get_content()
-            except:
-                continue
-        soup = BeautifulSoup(xml, features='lxml')
-        chapter_text = ''
-        html_content_tags = ['title', 'p', 'h1', 'h2', 'h3', 'h4', 'li']
-        for child in soup.find_all(html_content_tags):
-            inner_text = child.text.strip() if child.text else ""
-            if inner_text:
-                chapter_text += inner_text + '\n'
-        chapter.extracted_text = chapter_text
-        document_chapters.append(chapter)
-    return document_chapters
 
 
 def convert_wav_to_m4a(wav_file_path, m4a_file_path):
     subprocess.run([
-        'ffmpeg',
+        'ffmpeg', '-y',
         '-i', wav_file_path,
         '-c:a', 'aac',
         '-b:a', '64k',
@@ -109,7 +70,7 @@ def convert_wav_to_m4a(wav_file_path, m4a_file_path):
     ])
 
 
-def create_m4b(chapter_files, filename, cover_image):
+def create_m4b(chapter_files, output_path, cover_image, title):
     with TemporaryDirectory() as tempdir:
         # Create concat file
         concat_file = os.path.join(tempdir, 'concat.txt')
@@ -117,23 +78,20 @@ def create_m4b(chapter_files, filename, cover_image):
             for wav_file in chapter_files:
                 m4a_file_path = os.path.join(tempdir, Path(wav_file).stem + '.m4a')
                 file.write(f"file '{m4a_file_path}'\n")
-        
+
         # Convert the wav files to m4a in parallel
         with ThreadPoolExecutor() as tpe:
             futures = []
             for wav_file in chapter_files:
                 m4a_file_path = os.path.join(tempdir, Path(wav_file).stem + '.m4a')
-                futures.append(tpe.submit(convert_wav_to_m4a, wav_file, m4a_file_path))
+                futures.append(tpe.submit(convert_wav_to_m4a, wav_file,
+                                          m4a_file_path))
 
         # Wait for all conversions to finish
         for future in futures:
             future.result()
 
-        # Debug: Check if all expected m4a files exist before merging
-        print("Checking files before merging:")
-        with open(concat_file, "r") as f:
-            print(f.read())  # Show which files ffmpeg expects
-
+        # Check if all expected m4a files exist before merging
         for line in open(concat_file):
             file_path = line.strip().split("file ")[-1].strip("'")
             if not os.path.exists(file_path):
@@ -144,16 +102,14 @@ def create_m4b(chapter_files, filename, cover_image):
         if cover_image:
             cover_image_file = NamedTemporaryFile("wb", delete=False)
             cover_image_file.write(cover_image)
-            cover_image_file.close() # close it
+            cover_image_file.close()
             cover_image_args = [
-                "-i", cover_image_file.name, 
+                "-i", cover_image_file.name,
                 '-disposition:v', 'attached_pic'
             ]
-
         # Merge all the converted m4a files into one big file (no encoding needed)
-        final_filename = filename.replace('.epub', '.m4b')
         subprocess.run([
-            'ffmpeg',
+            'ffmpeg', '-y',
             '-safe', '0',
             '-f', 'concat',
             '-i', concat_file,
@@ -161,7 +117,7 @@ def create_m4b(chapter_files, filename, cover_image):
             *cover_image_args,
             '-map_metadata','1',
             '-c', 'copy',
-            final_filename
+            output_path
         ], check=True)
 
 
@@ -172,72 +128,36 @@ def probe_duration(file_name):
     return float(proc.stdout.strip())
 
 
-def create_index_file(title, creator, chapter_mp3_files, chapter_num):
+def create_index_file(title, creator, chapter_files, chapter_num,
+                      chapter_titles=None):
     with open("chapters.txt", "w") as f:
-        f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\n\n")
+        f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\nalbum={title}\n\n")
         start = 0
         chapter_num = int(chapter_num)
-        i = chapter_num
-        for c in chapter_mp3_files:
+        for idx, c in enumerate(chapter_files):
             duration = probe_duration(c)
             end = start + (int)(duration * 1000)
+            if chapter_titles and chapter_titles[idx]:
+                ch_title = chapter_titles[idx]
+            else:
+                ch_title = f"Chapter {chapter_num + idx}"
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}" +
-                    f"\ntitle=Chapter {i}\n\n")
-            i += 1
+                    f"\ntitle={ch_title}\n\n")
             start = end
 
 
-def resized_image(item):
-    image_data = item.get_content()
-    image = Image.open(io.BytesIO(image_data))
-    image.thumbnail((200, 300))
-    ratio = min(200/image.width, 300/image.height)
-    new_size = (int(image.width * ratio), int(image.height * ratio))
-    # Resize with high-quality resampling
-    resized = image.resize(new_size, Image.Resampling.LANCZOS)
-    # Create new image with gray background
-    background = Image.new('RGB', (200, 300), 'gray')
-    # Paste resized image centered
-    offset = ((200 - new_size[0])//2, (300 - new_size[1])//2)
-    background.paste(resized, offset)
-    return ImageTk.PhotoImage(background)
-
-
-def get_cover_image(book, resized):
-    for item in book.get_items():
-        if item.get_type() == ebooklib.ITEM_COVER:
-            if resized:
-                return resized_image(item)
-            else:
-                return item.get_content()
-        if item.get_type() == ebooklib.ITEM_IMAGE:
-            if 'cover' in item.get_name().lower():
-                if resized:
-                    return resized_image(item)
-                else:
-                    return item.get_content()
-    return None
-
-
 def convert_text_to_wav_file(text, voice, speed, filename,
-                             split_pattern=r'\n\n\n'):
+                             split_pattern=r'\n\n\n', on_segment=None,
+                             trailing_silence=0):
     if Path(filename).exists():
         Path(filename).unlink()
-    audio = gen_audio_segments(text, voice, speed, split_pattern)
+    text = normalize_text(text)
+    audio = gen_audio_segments(text, voice, speed, split_pattern, on_segment)
     if audio:
         audio = np.concatenate(audio)
+        if trailing_silence > 0:
+            silence = np.zeros(int(SAMPLE_RATE * trailing_silence))
+            audio = np.concatenate([audio, silence])
         soundfile.write(filename, audio, SAMPLE_RATE)
         return True
     return False
-
-
-def get_title(book):
-    title_metadata = book.get_metadata('DC', 'title')
-    title = title_metadata[0][0] if title_metadata else ''
-    return title
-
-
-def get_author(book):
-    creator_metadata = book.get_metadata('DC', 'creator')
-    creator = creator_metadata[0][0] if creator_metadata else ''
-    return creator

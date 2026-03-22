@@ -81,5 +81,48 @@ python3 -m autiobooks
 
 The program creates .wav files for each chapter, then combines them into a .m4b file for playing using an audiobook player.
 
+## Docker
+
+You can run Autiobooks in a Docker container. Since it's a GUI application, you'll need X11 forwarding for display.
+
+### Build and run with Docker Compose
+
+```bash
+docker compose up --build
+```
+
+Place your `.epub` files in the `./books/` directory — this is mounted as the working directory inside the container.
+
+### X11 Display Setup
+
+**Linux / WSL2:**
+```bash
+xhost +local:docker
+docker compose up --build
+```
+
+**Windows (with [VcXsrv](https://sourceforge.net/projects/vcxsrv/) or similar X server):**
+```bash
+# Start VcXsrv with "Disable access control" checked
+DISPLAY=host.docker.internal:0 docker compose up --build
+```
+
+**macOS (with [XQuartz](https://www.xquartz.org/)):**
+```bash
+xhost +localhost
+DISPLAY=host.docker.internal:0 docker compose up --build
+```
+
+### GPU Acceleration
+
+If you have an NVIDIA GPU and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed, uncomment the `deploy` section in `docker-compose.yml` to enable CUDA acceleration.
+
+### Volumes
+
+| Volume | Purpose |
+|--------|---------|
+| `./books` | Epub input and audiobook output |
+| `autiobooks-config` | Persisted settings between runs |
+
 ## Author
 by David Nesbitt, distributed under MIT license.
