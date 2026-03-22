@@ -37,7 +37,61 @@ PRs are welcome!
 
 ## Changelog
 
-#### 1.1.0 
+#### 1.2.0
+
+**Refactoring:**
+- Split `engine.py` into `epub_parser.py`, `text_processing.py`, `config.py`, and a slimmed `engine.py`
+
+**Epub parsing:**
+- Expanded HTML tag handling from 7 to 30+ block-level tags
+- No duplication from nested blocks
+- Handles `<br>`, `<img>` alt text, `<hr>`, footnote removal, script/style/nav stripping
+
+**Text normalization:**
+- Unicode cleanup (smart quotes, em-dash, en-dash, ligatures)
+- Abbreviation expansion (30+ common book abbreviations)
+- Context-aware Roman numeral conversion
+- Special character/symbol replacement, URL/email removal
+- Scene break marker removal (`***`, `---`, etc.)
+
+**GUI improvements:**
+- Bottom controls in fixed frame (never cut off)
+- Compact two-row settings layout
+- Chapter titles from epub TOC instead of filenames (with toggle to disable)
+- Mouse wheel scrolling on chapter list
+- Resizable progress bar with per-chapter progress and ETA
+- Threaded preview (no GUI freeze)
+- Cancel button for conversions
+- Error dialogs instead of terminal-only errors
+- Select all / clear all buttons for chapter selection
+
+**Performance:**
+- TTS pipeline cached and reused across chapters (model loads once)
+- `torch.inference_mode()` for faster TTS inference
+- Chapter durations calculated from sample count instead of spawning ffprobe per chapter
+
+**Docker:**
+- Added Dockerfile, docker-compose.yml, and .dockerignore
+- X11 forwarding for GUI display
+- NVIDIA GPU support
+- Volume mounts for books and persistent settings
+- Updated devcontainer to match
+
+**Bug fixes & polish:**
+- Save As dialog for output location
+- Speed validation blocks conversion
+- ffmpeg `-y` flag prevents interactive prompts
+- Temp file cleanup (wav, chapters.txt, preview audio)
+- Cover image temp file leak fixed
+- M4b overwrite handling
+- ffmpeg error capture with clear error messages
+- Input validation for chapter number and gap fields
+- Defensive metadata extraction for malformed epubs
+- Warning suppression (ebooklib, torch, Kokoro)
+- Replaced `exit(1)` with proper exceptions
+- Added `lxml` as explicit dependency
+
+#### 1.1.0
 
 - Fix race condition - @Thabian
 
