@@ -43,12 +43,23 @@ def start_gui():
                                " create mp3 and m4b audiobook files.")
         exit(1)
 
-    voice_frame = tk.Frame(root)
-    voice_frame.pack(pady=5, padx=5)
+    # Row 1: Voice, speed, and gap settings
+    settings_row1 = tk.Frame(root)
+    settings_row1.pack(pady=5, padx=5)
 
-    # add a scale to set speed
-    speed_label = tk.Label(voice_frame, text="Reading speed:")
-    speed_label.pack(side=tk.LEFT, pady=5, padx=5)
+    voice_label = tk.Label(settings_row1, text="Select Voice:")
+    voice_label.pack(side=tk.LEFT, pady=5, padx=5)
+
+    voice_combo = ttk.Combobox(
+        settings_row1,
+        values=voices_emojified,
+        state="readonly"
+    )
+    voice_combo.set(voices[0])
+    voice_combo.pack(side=tk.LEFT, pady=5, padx=5)
+
+    speed_label = tk.Label(settings_row1, text="Reading speed:")
+    speed_label.pack(side=tk.LEFT, pady=5, padx=15)
 
     def check_speed_range(event=None):
         try:
@@ -62,17 +73,13 @@ def start_gui():
             speed_entry.configure(fg='red')
         return False
 
-    speed_entry = tk.Entry(
-        voice_frame,
-        width=5
-    )
+    speed_entry = tk.Entry(settings_row1, width=5)
     speed_entry.insert(0, "1.0")
-    speed_entry.pack(side=tk.LEFT, pady=10, padx=15)
+    speed_entry.pack(side=tk.LEFT, pady=5, padx=5)
     speed_entry.bind('<KeyRelease>', check_speed_range)
 
-    # Chapter gap (silence between chapters)
-    gap_label = tk.Label(voice_frame, text="Chapter gap (s):")
-    gap_label.pack(side=tk.LEFT, pady=5, padx=5)
+    gap_label = tk.Label(settings_row1, text="Chapter gap (s):")
+    gap_label.pack(side=tk.LEFT, pady=5, padx=15)
 
     def check_gap_range(event=None):
         try:
@@ -86,36 +93,33 @@ def start_gui():
             gap_entry.configure(fg='red')
         return False
 
-    gap_entry = tk.Entry(voice_frame, width=5)
+    gap_entry = tk.Entry(settings_row1, width=5)
     gap_entry.insert(0, "2.0")
-    gap_entry.pack(side=tk.LEFT, pady=10, padx=5)
+    gap_entry.pack(side=tk.LEFT, pady=5, padx=5)
     gap_entry.bind('<KeyRelease>', check_gap_range)
 
-    # add a tickbox to enable/disable GPU acceleration
+    # Row 2: Checkboxes
+    settings_row2 = tk.Frame(root)
+    settings_row2.pack(pady=2, padx=5)
+
     gpu_acceleration = tk.BooleanVar()
     gpu_acceleration.set(False)
     gpu_acceleration_checkbox = tk.Checkbutton(
-        voice_frame,
+        settings_row2,
         text="Enable GPU acceleration",
         variable=gpu_acceleration
     )
-
     if get_gpu_acceleration_available():
         gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
-    
-    # add a combo box with voice options
-    voice_label = tk.Label(voice_frame, text="Select Voice:")
-    voice_label.pack(side=tk.LEFT, pady=5, padx=5)
 
-    # add a combo box with voice options
-    # filter out the non-english voices (not working yet)
-    voice_combo = ttk.Combobox(
-        voice_frame,
-        values=voices_emojified,
-        state="readonly"
+    detect_titles = tk.BooleanVar()
+    detect_titles.set(True)
+    detect_titles_checkbox = tk.Checkbutton(
+        settings_row2,
+        text="Detect chapter titles",
+        variable=detect_titles
     )
-    voice_combo.set(voices[0])  # Set default selection
-    voice_combo.pack(side=tk.LEFT, pady=10, padx=5)
+    detect_titles_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
 
     # Load saved settings
     config = load_config()
@@ -129,6 +133,8 @@ def start_gui():
         gap_entry.insert(0, config['chapter_gap'])
     if config.get('gpu_acceleration'):
         gpu_acceleration.set(True)
+    if 'detect_titles' in config:
+        detect_titles.set(config['detect_titles'])
     last_directory = config.get('last_directory', '')
 
     def get_current_config():
@@ -137,6 +143,7 @@ def start_gui():
             'speed': speed_entry.get(),
             'chapter_gap': gap_entry.get(),
             'gpu_acceleration': gpu_acceleration.get(),
+            'detect_titles': detect_titles.get(),
             'last_directory': last_directory,
         }
 
@@ -311,9 +318,13 @@ def start_gui():
             cover_label.configure(image=cover_image)
 
         # set chapters with display titles
-        titles = get_chapter_titles(book, chapters_from_book)
-        for ch, title in zip(chapters_from_book, titles):
-            ch.display_title = title or ch.file_name
+        if detect_titles.get():
+            titles = get_chapter_titles(book, chapters_from_book)
+            for ch, title in zip(chapters_from_book, titles):
+                ch.display_title = title or ch.file_name
+        else:
+            for idx, ch in enumerate(chapters_from_book, start=1):
+                ch.display_title = f"Chapter {idx}"
         chapters.clear()
         chapters.extend(chapters_from_book)
         add_chapters_to_checkbox_frame()
@@ -367,7 +378,10 @@ def start_gui():
                 chapter_num = int(chapter_entry.get())
                 title = get_title(book)
                 creator = get_author(book)
-                chapter_titles = get_chapter_titles(book, chapters_selected)
+                if detect_titles.get():
+                    chapter_titles = get_chapter_titles(book, chapters_selected)
+                else:
+                    chapter_titles = None
                 chapter_gap = float(gap_entry.get())
                 steps = len(chapters_selected) + 2
                 current_step = 1
