@@ -1,3 +1,4 @@
 #!/bin/bash
+set -e
 
-/root/.local/bin/poetry install
+poetry install

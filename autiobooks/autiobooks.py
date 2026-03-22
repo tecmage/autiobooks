@@ -437,8 +437,6 @@ def start_gui():
                                   file=sys.stderr)
                     except Exception as e:
                         print(f"Chapter {i} failed: {e}", file=sys.stderr)
-                        import traceback
-                        traceback.print_exc()
                         root.after(0, lambda err=e, idx=i: messagebox.showerror(
                             "Conversion Error",
                             f"Chapter {idx} failed:\n{err}"))

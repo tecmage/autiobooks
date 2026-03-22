@@ -31,6 +31,9 @@ def get_gpu_acceleration_available():
     return torch.cuda.is_available()
 
 
+_pipeline_cache = {}
+
+
 def create_pipeline(lang_code):
     """Create a KPipeline instance with proper UTF-8 encoding handling"""
     import builtins
@@ -46,10 +49,17 @@ def create_pipeline(lang_code):
         builtins.open = original_open
 
 
+def get_pipeline(lang_code):
+    """Get or create a cached KPipeline for the given language code."""
+    if lang_code not in _pipeline_cache:
+        _pipeline_cache[lang_code] = create_pipeline(lang_code)
+    return _pipeline_cache[lang_code]
+
+
 def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
                        on_segment=None):
     # a for american or b for british etc.
-    pipeline = create_pipeline(voice[0])
+    pipeline = get_pipeline(voice[0])
     audio_segments = []
     speed = float(speed)
     for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
