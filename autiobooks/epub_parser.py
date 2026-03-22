@@ -172,15 +172,17 @@ def get_chapter_titles(book, chapters):
 
 
 def get_title(book):
-    title_metadata = book.get_metadata('DC', 'title')
-    title = title_metadata[0][0] if title_metadata else ''
-    return title
+    try:
+        return book.get_metadata('DC', 'title')[0][0] or ''
+    except (IndexError, TypeError):
+        return ''
 
 
 def get_author(book):
-    creator_metadata = book.get_metadata('DC', 'creator')
-    creator = creator_metadata[0][0] if creator_metadata else ''
-    return creator
+    try:
+        return book.get_metadata('DC', 'creator')[0][0] or ''
+    except (IndexError, TypeError):
+        return ''
 
 
 def resized_image(item):

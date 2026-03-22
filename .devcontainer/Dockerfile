@@ -20,3 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install poetry
 RUN curl -sSL https://install.python-poetry.org | python3 -
 ENV PATH="/root/.local/bin:${PATH}"
+
+# Use dummy SDL audio driver so pygame.mixer.init() works without a sound device
+ENV SDL_AUDIODRIVER=dummy
+# Ensure Python output is visible in logs
+ENV PYTHONUNBUFFERED=1

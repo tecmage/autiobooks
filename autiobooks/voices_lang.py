@@ -90,8 +90,7 @@ def get_language_from_voice(voice):
     elif voice.startswith("z"):
         return "cmn"
     else:
-        print("Voice not recognized.")
-        exit(1)
+        raise ValueError(f"Voice not recognized: {voice}")
 
 
 def emojify_voice(voice):

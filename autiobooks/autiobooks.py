@@ -15,7 +15,11 @@ import pygame.mixer
 import soundfile
 import numpy as np
 import shutil
+import tempfile
+import os
 from voices_lang import voices, voices_emojified, deemojify_voice
+
+PREVIEW_FILE = os.path.join(tempfile.gettempdir(), "autiobooks_preview.wav")
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -214,7 +218,7 @@ def start_gui():
                 audio_segments = gen_audio_segments(text, voice, speed,
                                                     split_pattern=r"")
                 final_audio = np.concatenate(audio_segments)
-                soundfile.write("temp.wav", final_audio, 24000)
+                soundfile.write(PREVIEW_FILE, final_audio, 24000)
                 root.after(0, lambda: play_preview(play_label))
             except Exception as e:
                 root.after(0, lambda: messagebox.showerror(
@@ -227,12 +231,12 @@ def start_gui():
 
     def play_preview(play_label):
         global playing_sample
-        if not Path("temp.wav").exists():
+        if not Path(PREVIEW_FILE).exists():
             play_label.config(text="▶️")
             return
         playing_sample = True
         play_label.config(text="⏹️")
-        pygame.mixer.music.load("temp.wav")
+        pygame.mixer.music.load(PREVIEW_FILE)
         pygame.mixer.music.play()
 
         def check_sound_end():
@@ -375,14 +379,24 @@ def start_gui():
                     chapters_selected = chapters
                 set_gpu_acceleration(gpu_acceleration.get())
                 filename = Path(file_path).name
-                chapter_num = int(chapter_entry.get())
+                try:
+                    chapter_num = int(chapter_entry.get())
+                except ValueError:
+                    root.after(0, lambda: messagebox.showerror(
+                        "Error", "Invalid chapter number."))
+                    return
                 title = get_title(book)
                 creator = get_author(book)
                 if detect_titles.get():
                     chapter_titles = get_chapter_titles(book, chapters_selected)
                 else:
                     chapter_titles = None
-                chapter_gap = float(gap_entry.get())
+                try:
+                    chapter_gap = float(gap_entry.get())
+                except ValueError:
+                    root.after(0, lambda: messagebox.showerror(
+                        "Error", "Invalid chapter gap value."))
+                    return
                 steps = len(chapters_selected) + 2
                 current_step = 1
 
@@ -714,7 +728,7 @@ def on_playback_complete(play_label):
     playing_sample = False
     play_label.config(text="▶️")
     pygame.mixer.music.unload()
-    Path("temp.wav").unlink(missing_ok=True)
+    Path(PREVIEW_FILE).unlink(missing_ok=True)
 
 
 def main():

@@ -73,13 +73,16 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
 
 
 def convert_wav_to_m4a(wav_file_path, m4a_file_path):
-    subprocess.run([
+    result = subprocess.run([
         'ffmpeg', '-y',
         '-i', wav_file_path,
         '-c:a', 'aac',
         '-b:a', '64k',
         m4a_file_path
-    ])
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed converting {wav_file_path}: {result.stderr}")
 
 
 def create_m4b(chapter_files, output_path, cover_image, title):
@@ -98,10 +101,8 @@ def create_m4b(chapter_files, output_path, cover_image, title):
                 m4a_file_path = os.path.join(tempdir, Path(wav_file).stem + '.m4a')
                 futures.append(tpe.submit(convert_wav_to_m4a, wav_file,
                                           m4a_file_path))
-
-        # Wait for all conversions to finish
-        for future in futures:
-            future.result()
+            for future in futures:
+                future.result()
 
         # Check if all expected m4a files exist before merging
         for line in open(concat_file):
@@ -111,26 +112,32 @@ def create_m4b(chapter_files, output_path, cover_image, title):
 
         # FFmpeg arguments for cover image if present
         cover_image_args = []
+        cover_image_path = None
         if cover_image:
             cover_image_file = NamedTemporaryFile("wb", delete=False)
             cover_image_file.write(cover_image)
             cover_image_file.close()
+            cover_image_path = cover_image_file.name
             cover_image_args = [
-                "-i", cover_image_file.name,
+                "-i", cover_image_path,
                 '-disposition:v', 'attached_pic'
             ]
         # Merge all the converted m4a files into one big file (no encoding needed)
-        subprocess.run([
-            'ffmpeg', '-y',
-            '-safe', '0',
-            '-f', 'concat',
-            '-i', concat_file,
-            '-i', 'chapters.txt',
-            *cover_image_args,
-            '-map_metadata','1',
-            '-c', 'copy',
-            output_path
-        ], check=True)
+        try:
+            subprocess.run([
+                'ffmpeg', '-y',
+                '-safe', '0',
+                '-f', 'concat',
+                '-i', concat_file,
+                '-i', 'chapters.txt',
+                *cover_image_args,
+                '-map_metadata','1',
+                '-c', 'copy',
+                output_path
+            ], check=True)
+        finally:
+            if cover_image_path and os.path.exists(cover_image_path):
+                os.unlink(cover_image_path)
 
 
 def probe_duration(file_name):
