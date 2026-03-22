@@ -13,6 +13,7 @@ from text_processing import normalize_text
 # Suppress torch warnings from Kokoro's model internals
 warnings.filterwarnings('ignore', message='.*dropout option adds dropout.*')
 warnings.filterwarnings('ignore', category=FutureWarning, module='torch.nn.utils.weight_norm')
+warnings.filterwarnings('ignore', message='.*Defaulting repo_id.*')
 
 
 SAMPLE_RATE = 24000
@@ -62,11 +63,12 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
     pipeline = get_pipeline(voice[0])
     audio_segments = []
     speed = float(speed)
-    for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
-                                  split_pattern=split_pattern):
-        audio_segments.append(audio)
-        if on_segment:
-            on_segment(len(audio_segments))
+    with torch.inference_mode():
+        for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
+                                      split_pattern=split_pattern):
+            audio_segments.append(audio)
+            if on_segment:
+                on_segment(len(audio_segments))
     return audio_segments
 
 
@@ -138,15 +140,14 @@ def probe_duration(file_name):
     return float(proc.stdout.strip())
 
 
-def create_index_file(title, creator, chapter_files, chapter_num,
+def create_index_file(title, creator, chapter_durations, chapter_num,
                       chapter_titles=None):
     with open("chapters.txt", "w") as f:
         f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\nalbum={title}\n\n")
         start = 0
         chapter_num = int(chapter_num)
-        for idx, c in enumerate(chapter_files):
-            duration = probe_duration(c)
-            end = start + (int)(duration * 1000)
+        for idx, duration in enumerate(chapter_durations):
+            end = start + int(duration * 1000)
             if chapter_titles and chapter_titles[idx]:
                 ch_title = chapter_titles[idx]
             else:
@@ -169,5 +170,5 @@ def convert_text_to_wav_file(text, voice, speed, filename,
             silence = np.zeros(int(SAMPLE_RATE * trailing_silence))
             audio = np.concatenate([audio, silence])
         soundfile.write(filename, audio, SAMPLE_RATE)
-        return True
-    return False
+        return len(audio) / SAMPLE_RATE
+    return None

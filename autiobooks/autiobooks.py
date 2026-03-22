@@ -7,7 +7,7 @@ from PIL import Image, ImageTk
 from pathlib import Path
 from engine import get_gpu_acceleration_available, gen_audio_segments
 from engine import set_gpu_acceleration, convert_text_to_wav_file
-from engine import create_index_file, create_m4b
+from engine import create_index_file, create_m4b, probe_duration
 from epub_parser import get_book, get_title, get_author, get_cover_image, get_chapter_titles
 from text_processing import normalize_text
 from config import load_config, save_config
@@ -351,6 +351,7 @@ def start_gui():
 
         def run_conversion(resume=False):
             wav_files = []
+            wav_durations = []
             new_wav_files = []  # only files generated this run
             conversion_success = False
             try:
@@ -392,6 +393,7 @@ def start_gui():
                         progress_label.config(
                             text=f"Skipping chapter {i} (already converted)")
                         wav_files.append(wav_filename)
+                        wav_durations.append(probe_duration(wav_filename))
                         words_done += word_counts[i - 1]
                         current_step += 1
                         progress['value'] = (current_step / steps) * 100
@@ -425,12 +427,13 @@ def start_gui():
                         progress['value'] = s + frac * (e - s)
 
                     try:
-                        result = convert_text_to_wav_file(
+                        duration = convert_text_to_wav_file(
                                 text, voice, speed, wav_filename,
                                 on_segment=on_segment,
                                 trailing_silence=chapter_gap)
-                        if result:
+                        if duration is not None:
                             wav_files.append(wav_filename)
+                            wav_durations.append(duration)
                             new_wav_files.append(wav_filename)
                         else:
                             print(f"Chapter {i}: conversion returned no audio",
@@ -462,7 +465,7 @@ def start_gui():
                     if wav_name in wav_files:
                         converted_titles.append(chapter_titles[i])
                         converted_idx += 1
-                create_index_file(title, creator, wav_files, chapter_num,
+                create_index_file(title, creator, wav_durations, chapter_num,
                                   converted_titles)
                 current_step += 1
                 progress['value'] = (current_step / steps) * 100
