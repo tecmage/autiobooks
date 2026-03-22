@@ -13,6 +13,28 @@ It supports American, British English, French, Korean, Japanese and Mandarin (th
 
 PRs are welcome!
 
+## Features
+
+- **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
+- **Multiple voices** — choose from a range of American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody
+- **Chapter selection** — select which chapters to convert, with word counts and text previews
+- **Chapter title detection** — automatically extracts chapter titles from the epub's table of contents or headings (can be toggled off)
+- **Voice preview** — listen to a sample of any chapter before converting the full book
+- **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them
+- **GPU acceleration** — CUDA support for significantly faster conversion on NVIDIA GPUs
+- **Adjustable settings** — reading speed, chapter gap duration, and starting chapter number
+- **Settings persistence** — voice, speed, gap, and other preferences are saved between sessions
+- **Cover art** — embeds the epub's cover image into the output `.m4b` file
+- **Docker support** — run in a container with X11 forwarding
+
+## Requirements
+
+- **Python** 3.10–3.12 (3.13 is not supported due to dependency constraints)
+- **ffmpeg** — required for audio encoding and m4b creation
+- **tkinter** — required for the GUI (included with most Python installations)
+- **espeak-ng** (optional) — improves pronunciation of uncommon words. Without it, Kokoro handles most text well, but espeak-ng provides a fallback for words the model hasn't seen
+- **NVIDIA GPU** (optional) — enables CUDA acceleration for faster conversion. Works with any CUDA-capable GPU. Without a GPU, conversion runs on CPU
+
 ## Changelog
 
 #### 1.1.0 
@@ -83,6 +105,10 @@ python -m autiobooks
 ```
 
 The program creates `.wav` files for each chapter, then combines them into a `.m4b` file for playing using an audiobook player.
+
+### GPU Acceleration
+
+If you have an NVIDIA GPU with CUDA support, check the "Enable GPU acceleration" option in the app to significantly speed up conversion. No additional setup is needed beyond having CUDA-compatible drivers installed.
 
 ## Docker
 
