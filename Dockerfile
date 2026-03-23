@@ -46,7 +46,5 @@ ENV DISPLAY=:0
 ENV SDL_AUDIODRIVER=dummy
 # Ensure Python output is visible in Docker logs
 ENV PYTHONUNBUFFERED=1
-# Source uses bare imports (from engine import ...) instead of relative imports
-ENV PYTHONPATH="/usr/local/lib/python3.12/site-packages/autiobooks:${PYTHONPATH}"
 
 ENTRYPOINT ["python", "-m", "autiobooks"]

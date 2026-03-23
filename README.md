@@ -9,7 +9,7 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
-It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody.
+It supports American, British English, French, Korean, Japanese and Mandarin (though we only support English, for now) and a wide range of different [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody.
 
 PRs are welcome!
 
@@ -18,6 +18,7 @@ PRs are welcome!
 - **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
 - **Multiple voices** — choose from a range of American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody
 - **Chapter selection** — select which chapters to convert, with word counts and text previews
+- **Drag and drop** — drag an epub file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
 - **Chapter title detection** — automatically extracts chapter titles from the epub's table of contents or headings (can be toggled off)
 - **Voice preview** — listen to a sample of any chapter before converting the full book
 - **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them
@@ -36,6 +37,14 @@ PRs are welcome!
 - **NVIDIA GPU** (optional) — enables CUDA acceleration for faster conversion. Works with any CUDA-capable GPU. Without a GPU, conversion runs on CPU
 
 ## Changelog
+
+#### 1.2.1
+
+**Bug fixes:**
+- All GUI progress/status updates now routed through the main thread (fixes rare Tkinter crashes during conversion)
+- FFmpeg stderr no longer decoded with `text=True` — prevents `UnicodeDecodeError` from leaving WAV temp files behind after a successful conversion
+- FFmpeg concat file now correctly escapes single quotes in file paths (fixes conversions failing for epubs with apostrophes in their filename)
+- Preview playback polling loop now exits cleanly when the user manually stops playback (previously leaked a polling loop per stopped preview)
 
 #### 1.2.0
 
@@ -68,7 +77,7 @@ PRs are welcome!
 **Performance:**
 - TTS pipeline cached and reused across chapters (model loads once)
 - `torch.inference_mode()` for faster TTS inference
-- Chapter durations calculated from sample count instead of spawning ffprobe per chapter
+- All chapters encoded in a single ffmpeg pass (one AAC delay, accurate chapter timestamps)
 
 **Docker:**
 - Added Dockerfile, docker-compose.yml, and .dockerignore
@@ -88,7 +97,6 @@ PRs are welcome!
 - Input validation for chapter number and gap fields
 - Defensive metadata extraction for malformed epubs
 - Warning suppression (ebooklib, torch, Kokoro)
-- Replaced `exit(1)` with proper exceptions
 - Added `lxml` as explicit dependency
 
 #### 1.1.0
@@ -150,6 +158,11 @@ brew install ffmpeg python-tk espeak-ng
 git clone https://github.com/plusuncold/autiobooks.git
 cd autiobooks
 pip install .
+```
+
+To also enable drag-and-drop support:
+```bash
+pip install ".[dnd]"
 ```
 
 ### 3. Run

@@ -7,13 +7,11 @@ import os
 from pathlib import Path
 from kokoro import KPipeline
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from concurrent.futures import ThreadPoolExecutor
-from text_processing import normalize_text
+from .text_processing import normalize_text
 
 # Suppress torch warnings from Kokoro's model internals
 warnings.filterwarnings('ignore', message='.*dropout option adds dropout.*')
 warnings.filterwarnings('ignore', category=FutureWarning, module='torch.nn.utils.weight_norm')
-warnings.filterwarnings('ignore', message='.*Defaulting repo_id.*')
 
 
 SAMPLE_RATE = 24000
@@ -39,10 +37,12 @@ def create_pipeline(lang_code):
     """Create a KPipeline instance with proper UTF-8 encoding handling"""
     import builtins
     original_open = builtins.open
+
     def utf8_open(file, mode='r', *args, **kwargs):
         if 'b' not in mode and 'encoding' not in kwargs:
             kwargs['encoding'] = 'utf-8'
         return original_open(file, mode, *args, **kwargs)
+
     try:
         builtins.open = utf8_open
         return KPipeline(lang_code=lang_code)
@@ -72,43 +72,25 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
     return audio_segments
 
 
-def convert_wav_to_m4a(wav_file_path, m4a_file_path):
-    result = subprocess.run([
-        'ffmpeg', '-y',
-        '-i', wav_file_path,
-        '-c:a', 'aac',
-        '-b:a', '64k',
-        m4a_file_path
-    ], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg failed converting {wav_file_path}: {result.stderr}")
-
-
-def create_m4b(chapter_files, output_path, cover_image, title):
+def create_m4b(chapter_files, output_path, cover_image, title, creator,
+               chapter_num, chapter_titles=None):
     with TemporaryDirectory() as tempdir:
-        # Create concat file
+        # Create concat file listing WAV files directly
         concat_file = os.path.join(tempdir, 'concat.txt')
-        with open(concat_file, 'w') as file:
+        with open(concat_file, 'w') as f:
             for wav_file in chapter_files:
-                m4a_file_path = os.path.join(tempdir, Path(wav_file).stem + '.m4a')
-                file.write(f"file '{m4a_file_path}'\n")
+                safe_path = wav_file.replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
 
-        # Convert the wav files to m4a in parallel
-        with ThreadPoolExecutor() as tpe:
-            futures = []
-            for wav_file in chapter_files:
-                m4a_file_path = os.path.join(tempdir, Path(wav_file).stem + '.m4a')
-                futures.append(tpe.submit(convert_wav_to_m4a, wav_file,
-                                          m4a_file_path))
-            for future in futures:
-                future.result()
-
-        # Check if all expected m4a files exist before merging
-        for line in open(concat_file):
-            file_path = line.strip().split("file ")[-1].strip("'")
-            if not os.path.exists(file_path):
-                print(f"Missing file: {file_path}")
+        # Probe WAV durations for chapter timestamps.
+        # Encoding all chapters in one ffmpeg pass means there is only one AAC
+        # encoder delay at the very start of the file. All chapter boundaries
+        # are positions within a continuous stream, so WAV-based timestamps
+        # match the encoded output exactly.
+        wav_durations = [probe_duration(f) for f in chapter_files]
+        chapters_file = create_index_file(
+            title, creator, wav_durations, chapter_num, chapter_titles,
+            output_dir=tempdir)
 
         # FFmpeg arguments for cover image if present
         cover_image_args = []
@@ -122,19 +104,24 @@ def create_m4b(chapter_files, output_path, cover_image, title):
                 "-i", cover_image_path,
                 '-disposition:v', 'attached_pic'
             ]
-        # Merge all the converted m4a files into one big file (no encoding needed)
+        # Encode all WAV chapters to AAC in a single pass with chapter metadata
         try:
-            subprocess.run([
+            result = subprocess.run([
                 'ffmpeg', '-y',
                 '-safe', '0',
                 '-f', 'concat',
                 '-i', concat_file,
-                '-i', 'chapters.txt',
+                '-i', chapters_file,
                 *cover_image_args,
-                '-map_metadata','1',
-                '-c', 'copy',
+                '-c:a', 'aac',
+                '-b:a', '64k',
+                '-c:v', 'copy',
+                '-map_metadata', '1',
                 output_path
-            ], check=True)
+            ], capture_output=True)
+            if result.returncode != 0:
+                stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
+                raise RuntimeError(f"FFmpeg failed:\n{stderr_text}")
         finally:
             if cover_image_path and os.path.exists(cover_image_path):
                 os.unlink(cover_image_path)
@@ -148,8 +135,9 @@ def probe_duration(file_name):
 
 
 def create_index_file(title, creator, chapter_durations, chapter_num,
-                      chapter_titles=None):
-    with open("chapters.txt", "w") as f:
+                      chapter_titles=None, output_dir=None):
+    chapters_path = Path(output_dir or '.') / 'chapters.txt'
+    with open(chapters_path, "w") as f:
         f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\nalbum={title}\n\n")
         start = 0
         chapter_num = int(chapter_num)
@@ -162,6 +150,7 @@ def create_index_file(title, creator, chapter_durations, chapter_num,
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}" +
                     f"\ntitle={ch_title}\n\n")
             start = end
+    return str(chapters_path)
 
 
 def convert_text_to_wav_file(text, voice, speed, filename,
