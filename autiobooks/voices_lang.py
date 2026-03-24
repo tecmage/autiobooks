@@ -70,26 +70,16 @@ LANGUAGE_TO_FLAG = {
 }
 
 
+_PREFIX_TO_LANGUAGE = {
+    'a': 'en-us', 'b': 'en-gb', 'e': 'es', 'f': 'fr-fr',
+    'h': 'hi', 'i': 'it', 'j': 'ja', 'p': 'pt-br', 'z': 'cmn',
+}
+
+
 def get_language_from_voice(voice):
-    if voice.startswith("a"):
-        return "en-us"
-    elif voice.startswith("b"):
-        return "en-gb"
-    elif voice.startswith("e"):
-        return "es"
-    elif voice.startswith("f"):
-        return "fr-fr"
-    elif voice.startswith("h"):
-        return "hi"
-    elif voice.startswith("i"):
-        return "it"
-    elif voice.startswith("j"):
-        return "ja"
-    elif voice.startswith("p"):
-        return "pt-br"
-    elif voice.startswith("z"):
-        return "cmn"
-    else:
+    try:
+        return _PREFIX_TO_LANGUAGE[voice[0]]
+    except KeyError:
         raise ValueError(f"Voice not recognized: {voice}")
 
 

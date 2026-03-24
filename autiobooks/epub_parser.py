@@ -101,6 +101,17 @@ def is_valid_chapter(chapter):
     return False
 
 
+def _get_chapter_html(chapter):
+    """Return raw HTML for a chapter, trying get_body_content() then get_content()."""
+    try:
+        return chapter.get_body_content()
+    except Exception:
+        try:
+            return chapter.get_content()
+        except Exception:
+            return None
+
+
 def find_document_chapters_and_extract_texts(book):
     """Returns every chapter that is an ITEM_DOCUMENT
     and enriches each chapter with extracted_text."""
@@ -108,13 +119,9 @@ def find_document_chapters_and_extract_texts(book):
     for chapter in book.get_items():
         if not is_valid_chapter(chapter):
             continue
-        try:
-            xml = chapter.get_body_content()
-        except Exception:
-            try:
-                xml = chapter.get_content()
-            except Exception:
-                continue
+        xml = _get_chapter_html(chapter)
+        if xml is None:
+            continue
         chapter.extracted_text = extract_text_from_html(xml)
         document_chapters.append(chapter)
     return document_chapters
@@ -122,13 +129,9 @@ def find_document_chapters_and_extract_texts(book):
 
 def _extract_heading(chapter):
     """Extract the first heading from a chapter's HTML as a fallback title."""
-    try:
-        xml = chapter.get_body_content()
-    except Exception:
-        try:
-            xml = chapter.get_content()
-        except Exception:
-            return None
+    xml = _get_chapter_html(chapter)
+    if xml is None:
+        return None
     soup = BeautifulSoup(xml, features='lxml')
     for tag_name in ['h1', 'h2', 'h3', 'title']:
         tag = soup.find(tag_name)

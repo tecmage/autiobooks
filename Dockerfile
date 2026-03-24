@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir \
     "lxml>=4.9.0"
 
 # Copy project and install
-COPY pyproject.toml setup.py README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE ./
 COPY autiobooks/ autiobooks/
 RUN pip install --no-cache-dir .
 

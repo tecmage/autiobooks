@@ -139,6 +139,7 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 *audio_codec_args,
                 '-c:v', 'copy',
                 '-map_metadata', '1',
+                '-movflags', '+disable_chpl',
                 '-progress', 'pipe:1',
                 '-nostats',
                 output_path

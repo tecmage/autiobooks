@@ -406,7 +406,6 @@ def start_gui():
 
         def run_conversion(resume=False):
             wav_files = []
-            known_durations = {}
             all_chapter_wav_files = []
             all_chapter_m4a_files = []
             encode_futures = {}  # wav_filename -> (Future, m4a_filename)
@@ -472,14 +471,14 @@ def start_gui():
                     text = chapter.extracted_text
                     if i == 1:
                         text = f"{title} by {creator}.\n{text}"
-                    wav_filename = str(wav_dir / f'{Path(filename).stem}_chapter_{i}.wav')
+                    stem = Path(filename).stem
+                    wav_filename = str(wav_dir / f'{stem}_chapter_{i}.wav')
+                    m4a_filename = str(wav_dir / f'{stem}_chapter_{i}_enc.m4a')
 
                     # Resume: skip chapters already converted
                     if resume and Path(wav_filename).exists():
                         set_status(f"Skipping chapter {i} (already converted)")
                         wav_files.append(wav_filename)
-                        m4a_filename = str(
-                            wav_dir / f'{Path(filename).stem}_chapter_{i}_enc.m4a')
                         encode_futures[wav_filename] = (
                             encode_executor.submit(
                                 encode_chapter_to_m4a, wav_filename, m4a_filename),
@@ -522,9 +521,6 @@ def start_gui():
                                 trailing_silence=chapter_gap)
                         if duration is not None:
                             wav_files.append(wav_filename)
-                            known_durations[wav_filename] = duration
-                            m4a_filename = str(
-                                wav_dir / f'{Path(filename).stem}_chapter_{i}_enc.m4a')
                             encode_futures[wav_filename] = (
                                 encode_executor.submit(
                                     encode_chapter_to_m4a, wav_filename, m4a_filename),
