@@ -38,6 +38,28 @@ PRs are welcome!
 
 ## Changelog
 
+#### 1.2.3
+
+**Performance:**
+- Each chapter is now encoded to AAC in a background thread immediately after TTS completes, overlapping encoding with TTS generation for subsequent chapters
+- The final m4b assembly step is now a fast stream copy (remux only) instead of a full re-encode, making the "Creating m4b file" step near-instant
+
+**GUI improvements:**
+- Version number shown in the title bar
+
+#### 1.2.2
+
+**Performance:**
+- m4b creation no longer runs ffprobe for freshly converted chapters — duration is captured directly from the TTS output, which is exact and avoids the subprocess overhead entirely
+- Remaining ffprobe calls (resumed chapters) now run in parallel instead of sequentially
+
+**GUI improvements:**
+- Progress percentage shown during m4b encoding (`Creating m4b file... 42%`)
+
+**Bug fixes:**
+- Temp wav cleanup on success now tracks all chapter files, including any that were created on disk but not used (e.g. a chapter that produced no audio) — previously those could be left behind
+- Added a short delay and retry loop before deleting temp wav files to handle cases where the OS still has a file handle open
+
 #### 1.2.1
 
 **Bug fixes:**

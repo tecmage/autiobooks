@@ -1,5 +1,7 @@
 import subprocess
+import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import soundfile
 import torch
@@ -73,23 +75,42 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
 
 
 def create_m4b(chapter_files, output_path, cover_image, title, creator,
-               chapter_num, chapter_titles=None):
+               chapter_num, chapter_titles=None, progress_callback=None,
+               known_durations=None, preencoded=False):
     with TemporaryDirectory() as tempdir:
-        # Create concat file listing WAV files directly
+        # Create concat file listing chapter files
         concat_file = os.path.join(tempdir, 'concat.txt')
         with open(concat_file, 'w') as f:
-            for wav_file in chapter_files:
-                safe_path = wav_file.replace("'", "'\\''")
+            for chapter_file in chapter_files:
+                safe_path = chapter_file.replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
 
-        # Probe WAV durations for chapter timestamps.
-        # Encoding all chapters in one ffmpeg pass means there is only one AAC
-        # encoder delay at the very start of the file. All chapter boundaries
-        # are positions within a continuous stream, so WAV-based timestamps
-        # match the encoded output exactly.
-        wav_durations = [probe_duration(f) for f in chapter_files]
+        # Resolve chapter durations for timestamp metadata.
+        # When pre-encoded M4A files are provided the WAV-based durations are
+        # not usable — each M4A has an AAC encoder delay prepended that would
+        # accumulate across chapters. Always probe the M4A files in that case.
+        # For raw WAV files, use any caller-supplied durations and only probe
+        # the remainder (e.g. chapters recovered via resume).
+        if preencoded:
+            with ThreadPoolExecutor(max_workers=min(len(chapter_files), 8)) as pool:
+                durations = list(pool.map(probe_duration, chapter_files))
+        else:
+            known = known_durations or {}
+            files_to_probe = [f for f in chapter_files if f not in known]
+            if files_to_probe:
+                with ThreadPoolExecutor(
+                        max_workers=min(len(files_to_probe), 8)) as pool:
+                    probed = dict(zip(files_to_probe,
+                                      pool.map(probe_duration, files_to_probe)))
+            else:
+                probed = {}
+            durations = [
+                known[f] if f in known else probed[f]
+                for f in chapter_files
+            ]
+
         chapters_file = create_index_file(
-            title, creator, wav_durations, chapter_num, chapter_titles,
+            title, creator, durations, chapter_num, chapter_titles,
             output_dir=tempdir)
 
         # FFmpeg arguments for cover image if present
@@ -104,27 +125,67 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 "-i", cover_image_path,
                 '-disposition:v', 'attached_pic'
             ]
-        # Encode all WAV chapters to AAC in a single pass with chapter metadata
+
+        audio_codec_args = ['-c:a', 'copy'] if preencoded else ['-c:a', 'aac', '-b:a', '64k']
+        total_duration_us = sum(durations) * 1_000_000
         try:
-            result = subprocess.run([
+            proc = subprocess.Popen([
                 'ffmpeg', '-y',
                 '-safe', '0',
                 '-f', 'concat',
                 '-i', concat_file,
                 '-i', chapters_file,
                 *cover_image_args,
-                '-c:a', 'aac',
-                '-b:a', '64k',
+                *audio_codec_args,
                 '-c:v', 'copy',
                 '-map_metadata', '1',
+                '-progress', 'pipe:1',
+                '-nostats',
                 output_path
-            ], capture_output=True)
-            if result.returncode != 0:
-                stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            stderr_buf = []
+            stderr_thread = threading.Thread(
+                target=lambda: stderr_buf.append(proc.stderr.read()))
+            stderr_thread.start()
+
+            for line in proc.stdout:
+                if progress_callback and line.startswith('out_time_ms='):
+                    try:
+                        us = int(line.split('=', 1)[1])
+                        if total_duration_us > 0:
+                            pct = min(100, int(us / total_duration_us * 100))
+                            progress_callback(pct)
+                    except ValueError:
+                        pass
+
+            proc.wait()
+            stderr_thread.join()
+            if proc.returncode != 0:
+                stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
                 raise RuntimeError(f"FFmpeg failed:\n{stderr_text}")
         finally:
             if cover_image_path and os.path.exists(cover_image_path):
                 os.unlink(cover_image_path)
+
+
+def encode_chapter_to_m4a(wav_path, m4a_path):
+    """Encode a single WAV chapter to AAC/M4A.
+
+    Intended to run in a background thread during TTS generation so that the
+    final assembly step can do a fast stream-copy instead of re-encoding.
+    """
+    result = subprocess.run([
+        'ffmpeg', '-y',
+        '-i', wav_path,
+        '-c:a', 'aac',
+        '-b:a', '64k',
+        m4a_path
+    ], capture_output=True)
+    if result.returncode != 0:
+        stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
+        raise RuntimeError(f"Chapter encoding failed:\n{stderr_text}")
+    return m4a_path
 
 
 def probe_duration(file_name):

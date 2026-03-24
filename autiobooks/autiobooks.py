@@ -2,12 +2,14 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import sys
 import time
+import importlib.metadata
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageTk
 from pathlib import Path
 from .engine import get_gpu_acceleration_available, gen_audio_segments
 from .engine import set_gpu_acceleration, convert_text_to_wav_file
-from .engine import create_m4b
+from .engine import create_m4b, encode_chapter_to_m4a
 from .epub_parser import get_book, get_title, get_author, get_cover_image, get_chapter_titles
 from .text_processing import normalize_text
 from .config import load_config, save_config
@@ -56,7 +58,11 @@ def add_tooltip(widget, text):
 
 def start_gui():
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-    root.title('Autiobooks')
+    try:
+        _version = importlib.metadata.version('autiobooks')
+    except importlib.metadata.PackageNotFoundError:
+        _version = '?'
+    root.title(f'Autiobooks v{_version}')
     window_width = 1000
     window_height = 900
     root.geometry(f"{window_width}x{window_height}")
@@ -400,6 +406,11 @@ def start_gui():
 
         def run_conversion(resume=False):
             wav_files = []
+            known_durations = {}
+            all_chapter_wav_files = []
+            all_chapter_m4a_files = []
+            encode_futures = {}  # wav_filename -> (Future, m4a_filename)
+            encode_executor = ThreadPoolExecutor(max_workers=1)
             conversion_success = False
             try:
                 chapters_selected = [chapter
@@ -412,6 +423,14 @@ def start_gui():
                 set_gpu_acceleration(gpu_acceleration.get())
                 filename = Path(file_path).name
                 wav_dir = Path(file_path).parent
+                all_chapter_wav_files = [
+                    str(wav_dir / f'{Path(filename).stem}_chapter_{i}.wav')
+                    for i in range(1, len(chapters_selected) + 1)
+                ]
+                all_chapter_m4a_files = [
+                    str(wav_dir / f'{Path(filename).stem}_chapter_{i}_enc.m4a')
+                    for i in range(1, len(chapters_selected) + 1)
+                ]
                 try:
                     chapter_num = int(chapter_entry.get())
                 except ValueError:
@@ -459,6 +478,12 @@ def start_gui():
                     if resume and Path(wav_filename).exists():
                         set_status(f"Skipping chapter {i} (already converted)")
                         wav_files.append(wav_filename)
+                        m4a_filename = str(
+                            wav_dir / f'{Path(filename).stem}_chapter_{i}_enc.m4a')
+                        encode_futures[wav_filename] = (
+                            encode_executor.submit(
+                                encode_chapter_to_m4a, wav_filename, m4a_filename),
+                            m4a_filename)
                         words_done += word_counts[i - 1]
                         current_step += 1
                         set_progress((current_step / steps) * 100)
@@ -497,6 +522,13 @@ def start_gui():
                                 trailing_silence=chapter_gap)
                         if duration is not None:
                             wav_files.append(wav_filename)
+                            known_durations[wav_filename] = duration
+                            m4a_filename = str(
+                                wav_dir / f'{Path(filename).stem}_chapter_{i}_enc.m4a')
+                            encode_futures[wav_filename] = (
+                                encode_executor.submit(
+                                    encode_chapter_to_m4a, wav_filename, m4a_filename),
+                                m4a_filename)
                         else:
                             print(f"Chapter {i}: conversion returned no audio",
                                   file=sys.stderr)
@@ -518,7 +550,15 @@ def start_gui():
                         "Error", "No chapters were converted."))
                     return
 
-                set_status("Creating m4b file")
+                # Wait for any background encoding still in progress, then
+                # collect the pre-encoded M4A paths in wav_files order.
+                set_status("Creating m4b file... 0%")
+                m4a_files = []
+                for wav_name in wav_files:
+                    future, m4a_name = encode_futures[wav_name]
+                    future.result()  # raises if encoding failed; usually instant
+                    m4a_files.append(m4a_name)
+
                 # Build titles list matching only successfully converted chapters
                 converted_titles = []
                 for i, chapter in enumerate(chapters_selected):
@@ -527,8 +567,14 @@ def start_gui():
                         if chapter_titles is not None:
                             converted_titles.append(chapter_titles[i])
                 cover_image_full = get_cover_image(book, False)
-                create_m4b(wav_files, output_path, cover_image_full, title,
-                           creator, chapter_num, converted_titles or None)
+
+                def m4b_progress(pct):
+                    set_status(f"Creating m4b file... {pct}%")
+
+                create_m4b(m4a_files, output_path, cover_image_full, title,
+                           creator, chapter_num, converted_titles or None,
+                           progress_callback=m4b_progress,
+                           preencoded=True)
                 set_status("Conversion complete")
                 conversion_success = True
             except Exception as e:
@@ -536,10 +582,29 @@ def start_gui():
                     "Error", f"Conversion failed:\n{err}"))
                 set_status("Error")
             finally:
+                # Wait for any background encoding threads before touching files
+                encode_executor.shutdown(wait=True)
                 if conversion_success:
-                    # Clean up all wav files on success
-                    for wav_file in wav_files:
-                        Path(wav_file).unlink(missing_ok=True)
+                    # Brief delay before cleanup — the m4b muxer may still have
+                    # a file handle open on some systems
+                    time.sleep(3)
+                    # Clean up all chapter wav files on success, including any
+                    # that were created but not successfully added to wav_files
+                    for wav_file in all_chapter_wav_files:
+                        wav_path = Path(wav_file)
+                        for attempt in range(3):
+                            try:
+                                wav_path.unlink(missing_ok=True)
+                                break
+                            except OSError:
+                                if attempt < 2:
+                                    time.sleep(2)
+                                else:
+                                    print(f"Warning: could not remove {wav_file}",
+                                          file=sys.stderr)
+                # Always remove intermediate M4A files (not kept for resume)
+                for m4a_file in all_chapter_m4a_files:
+                    Path(m4a_file).unlink(missing_ok=True)
                 # On cancel/failure, keep wav files for resume
                 cancel_event.clear()
                 root.after(0, enable_controls)
