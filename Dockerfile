@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir \
     "lxml>=4.9.0"
 
 # Copy project and install
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml setup.py README.md LICENSE ./
 COPY autiobooks/ autiobooks/
 RUN pip install --no-cache-dir .
 
@@ -46,5 +46,7 @@ ENV DISPLAY=:0
 ENV SDL_AUDIODRIVER=dummy
 # Ensure Python output is visible in Docker logs
 ENV PYTHONUNBUFFERED=1
+# Source uses bare imports (from engine import ...) instead of relative imports
+ENV PYTHONPATH="/usr/local/lib/python3.12/site-packages/autiobooks:${PYTHONPATH}"
 
 ENTRYPOINT ["python", "-m", "autiobooks"]

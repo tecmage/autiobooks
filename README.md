@@ -9,7 +9,7 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
-It supports American, British English, French, Korean, Japanese and Mandarin (though we only support English, for now) and a wide range of different [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody.
+It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody.
 
 PRs are welcome!
 
@@ -18,7 +18,6 @@ PRs are welcome!
 - **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
 - **Multiple voices** — choose from a range of American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody
 - **Chapter selection** — select which chapters to convert, with word counts and text previews
-- **Drag and drop** — drag an epub file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
 - **Chapter title detection** — automatically extracts chapter titles from the epub's table of contents or headings (can be toggled off)
 - **Voice preview** — listen to a sample of any chapter before converting the full book
 - **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them
@@ -38,6 +37,27 @@ PRs are welcome!
 
 ## Changelog
 
+#### 1.5.0
+
+**New features:**
+- **Batch queue system** — "Add to Batch" button captures the current epub with all its settings (selected chapters, voice, speed, gap, detect titles, starting chapter) into a queue
+- **Batch Queue window** (Tools > Batch Queue...) — view, reorder, remove queued jobs, select output directory, and start batch conversion
+- Sequential batch conversion with per-job progress tracking and ETA
+- Per-file error handling — failures don't stop the batch, summary shown on completion
+
+#### 1.4.0
+
+**GUI improvements:**
+- Select all / clear all buttons for chapter selection
+- Starting chapter number field with validation and tooltip (useful when splitting a book across multiple files)
+
+#### 1.3.0
+
+**New features:**
+- Drag-and-drop epub file support (optional `tkinterdnd2` dependency)
+- Tools menu added with "Append M4B files..." for merging two audiobooks into one
+- Tooltip system for UI hints
+
 #### 1.2.3
 
 **Performance:**
@@ -54,7 +74,7 @@ PRs are welcome!
 - Remaining ffprobe calls (resumed chapters) now run in parallel instead of sequentially
 
 **GUI improvements:**
-- Progress percentage shown during m4b encoding (`Creating m4b file... 42%`)
+- Progress percentage shown during m4b encoding (Creating m4b file... 42%)
 
 **Bug fixes:**
 - Temp wav cleanup on success now tracks all chapter files, including any that were created on disk but not used (e.g. a chapter that produced no audio) — previously those could be left behind
@@ -64,7 +84,7 @@ PRs are welcome!
 
 **Bug fixes:**
 - All GUI progress/status updates now routed through the main thread (fixes rare Tkinter crashes during conversion)
-- FFmpeg stderr no longer decoded with `text=True` — prevents `UnicodeDecodeError` from leaving WAV temp files behind after a successful conversion
+- FFmpeg stderr no longer decoded with text=True — prevents UnicodeDecodeError from leaving WAV temp files behind after a successful conversion
 - FFmpeg concat file now correctly escapes single quotes in file paths (fixes conversions failing for epubs with apostrophes in their filename)
 - Preview playback polling loop now exits cleanly when the user manually stops playback (previously leaked a polling loop per stopped preview)
 
@@ -99,7 +119,7 @@ PRs are welcome!
 **Performance:**
 - TTS pipeline cached and reused across chapters (model loads once)
 - `torch.inference_mode()` for faster TTS inference
-- All chapters encoded in a single ffmpeg pass (one AAC delay, accurate chapter timestamps)
+- Chapter durations calculated from sample count instead of spawning ffprobe per chapter
 
 **Docker:**
 - Added Dockerfile, docker-compose.yml, and .dockerignore
@@ -119,6 +139,7 @@ PRs are welcome!
 - Input validation for chapter number and gap fields
 - Defensive metadata extraction for malformed epubs
 - Warning suppression (ebooklib, torch, Kokoro)
+- Replaced `exit(1)` with proper exceptions
 - Added `lxml` as explicit dependency
 
 #### 1.1.0
@@ -180,11 +201,6 @@ brew install ffmpeg python-tk espeak-ng
 git clone https://github.com/plusuncold/autiobooks.git
 cd autiobooks
 pip install .
-```
-
-To also enable drag-and-drop support:
-```bash
-pip install ".[dnd]"
 ```
 
 ### 3. Run

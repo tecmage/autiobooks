@@ -1,6 +1,7 @@
 import subprocess
 import threading
 import warnings
+import json
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import soundfile
@@ -187,6 +188,116 @@ def encode_chapter_to_m4a(wav_path, m4a_path):
         stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
         raise RuntimeError(f"Chapter encoding failed:\n{stderr_text}")
     return m4a_path
+
+
+def _probe_chapters(file_path):
+    """Return list of chapter dicts from an m4b file via ffprobe."""
+    result = subprocess.run([
+        'ffprobe', '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_chapters',
+        file_path
+    ], capture_output=True, text=True, check=True)
+    return json.loads(result.stdout).get('chapters', [])
+
+
+def _probe_format_tags(file_path):
+    """Return the format-level metadata tags from an m4b file."""
+    result = subprocess.run([
+        'ffprobe', '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_format',
+        file_path
+    ], capture_output=True, text=True, check=True)
+    return json.loads(result.stdout).get('format', {}).get('tags', {})
+
+
+def append_m4b(base_path, append_path, output_path, progress_callback=None):
+    """Append append_path onto base_path, writing the result to output_path.
+
+    Cover art and global metadata are taken from base_path. Chapter markers
+    from both files are merged with timestamps adjusted accordingly.
+    """
+    with TemporaryDirectory() as tempdir:
+        # Concat list
+        concat_file = os.path.join(tempdir, 'concat.txt')
+        with open(concat_file, 'w') as f:
+            for p in [base_path, append_path]:
+                safe = p.replace("'", "'\\''")
+                f.write(f"file '{safe}'\n")
+
+        # Durations and chapters
+        base_duration = probe_duration(base_path)
+        base_duration_ms = int(base_duration * 1000)
+        append_duration = probe_duration(append_path)
+        base_chapters = _probe_chapters(base_path)
+        append_chapters = _probe_chapters(append_path)
+
+        # Global metadata from base file
+        tags = _probe_format_tags(base_path)
+        title = tags.get('title', '')
+        artist = tags.get('artist', tags.get('album_artist', ''))
+        album = tags.get('album', title)
+
+        # Build merged FFMETADATA1
+        chapters_file = os.path.join(tempdir, 'chapters.txt')
+        with open(chapters_file, 'w') as f:
+            f.write(f";FFMETADATA1\ntitle={title}\nartist={artist}\nalbum={album}\n\n")
+
+            def write_chapters(chapters, offset_ms=0):
+                for ch in chapters:
+                    tb_num, tb_den = map(int, ch['time_base'].split('/'))
+                    start_ms = int(ch['start'] * tb_num * 1000 / tb_den) + offset_ms
+                    end_ms = int(ch['end'] * tb_num * 1000 / tb_den) + offset_ms
+                    ch_title = ch.get('tags', {}).get('title', '')
+                    f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}"
+                            f"\nEND={end_ms}\ntitle={ch_title}\n\n")
+
+            write_chapters(base_chapters)
+            write_chapters(append_chapters, offset_ms=base_duration_ms)
+
+        total_duration_us = (base_duration + append_duration) * 1_000_000
+        try:
+            proc = subprocess.Popen([
+                'ffmpeg', '-y',
+                '-safe', '0',
+                '-f', 'concat',
+                '-i', concat_file,        # input 0: concatenated audio
+                '-i', chapters_file,      # input 1: merged metadata + chapters
+                '-i', base_path,          # input 2: cover art source
+                '-map', '0:a',
+                '-map', '2:v?',
+                '-c', 'copy',
+                '-disposition:v', 'attached_pic',
+                '-map_metadata', '1',
+                '-movflags', '+disable_chpl',
+                '-progress', 'pipe:1',
+                '-nostats',
+                output_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            stderr_buf = []
+            stderr_thread = threading.Thread(
+                target=lambda: stderr_buf.append(proc.stderr.read()))
+            stderr_thread.start()
+
+            for line in proc.stdout:
+                if progress_callback and line.startswith('out_time_ms='):
+                    try:
+                        us = int(line.split('=', 1)[1])
+                        if total_duration_us > 0:
+                            pct = min(100, int(us / total_duration_us * 100))
+                            progress_callback(pct)
+                    except ValueError:
+                        pass
+
+            proc.wait()
+            stderr_thread.join()
+            if proc.returncode != 0:
+                stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
+                raise RuntimeError(f"FFmpeg append failed:\n{stderr_text}")
+        finally:
+            pass  # TemporaryDirectory handles cleanup
 
 
 def probe_duration(file_name):

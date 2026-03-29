@@ -5,11 +5,13 @@ import time
 import importlib.metadata
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Optional
 from PIL import Image, ImageTk
 from pathlib import Path
 from .engine import get_gpu_acceleration_available, gen_audio_segments
 from .engine import set_gpu_acceleration, convert_text_to_wav_file
-from .engine import create_m4b, encode_chapter_to_m4a
+from .engine import create_m4b, encode_chapter_to_m4a, append_m4b
 from .epub_parser import get_book, get_title, get_author, get_cover_image, get_chapter_titles
 from .text_processing import normalize_text
 from .config import load_config, save_config
@@ -31,6 +33,25 @@ except ImportError:
 
 playing_sample = False
 book = None
+
+
+@dataclass
+class BatchJob:
+    file_path: str
+    book: object
+    chapters: list
+    selected_chapter_indices: list
+    voice: str
+    speed: str
+    chapter_gap: str
+    gpu_acceleration: bool
+    detect_titles: bool
+    starting_chapter: int
+    chapter_titles: Optional[list] = None
+    title: str = ""
+    author: str = ""
+    total_words: int = 0
+    status: str = "Queued"
 
 
 def add_tooltip(widget, text):
@@ -68,6 +89,87 @@ def start_gui():
     root.geometry(f"{window_width}x{window_height}")
     root.resizable(True, True)
     root.option_add("*Font", "Arial 12")  # Set default font
+
+    def show_append_dialog():
+        dialog = tk.Toplevel(root)
+        dialog.title('Append M4B Files')
+        dialog.geometry('700x210')
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        for row, label in enumerate(['Base file:', 'Append file:', 'Output file:']):
+            tk.Label(dialog, text=label).grid(row=row, column=0, sticky='e',
+                                              padx=10, pady=6)
+        base_var = tk.StringVar()
+        append_var = tk.StringVar()
+        output_var = tk.StringVar()
+
+        for row, var in enumerate([base_var, append_var, output_var]):
+            ttk.Entry(dialog, textvariable=var, width=45).grid(
+                row=row, column=1, padx=5)
+
+        def browse_open(var):
+            p = filedialog.askopenfilename(
+                parent=dialog, filetypes=[('M4B files', '*.m4b')])
+            if p:
+                var.set(p)
+
+        def browse_save(var):
+            p = filedialog.asksaveasfilename(
+                parent=dialog, filetypes=[('M4B files', '*.m4b')],
+                defaultextension='.m4b')
+            if p:
+                var.set(p)
+
+        ttk.Button(dialog, text='Browse',
+                   command=lambda: browse_open(base_var)).grid(
+            row=0, column=2, padx=5)
+        ttk.Button(dialog, text='Browse',
+                   command=lambda: browse_open(append_var)).grid(
+            row=1, column=2, padx=5)
+        ttk.Button(dialog, text='Browse',
+                   command=lambda: browse_save(output_var)).grid(
+            row=2, column=2, padx=5)
+
+        status_label = tk.Label(dialog, text='')
+        status_label.grid(row=3, column=0, columnspan=3, pady=6)
+
+        def do_append():
+            base = base_var.get().strip()
+            append = append_var.get().strip()
+            output = output_var.get().strip()
+            if not base or not append or not output:
+                messagebox.showerror('Error', 'Please select all three files.',
+                                     parent=dialog)
+                return
+            append_btn.configure(state='disabled')
+            status_label.config(text='Appending... 0%')
+
+            def run():
+                try:
+                    def progress(pct):
+                        dialog.after(0, lambda p=pct: status_label.config(
+                            text=f'Appending... {p}%'))
+                    append_m4b(base, append, output, progress_callback=progress)
+                    dialog.after(0, lambda: status_label.config(text='Done!'))
+                except Exception as e:
+                    dialog.after(0, lambda err=e: messagebox.showerror(
+                        'Error', str(err), parent=dialog))
+                    dialog.after(0, lambda: status_label.config(text='Error'))
+                finally:
+                    dialog.after(0, lambda: append_btn.configure(state='normal'))
+
+            threading.Thread(target=run, daemon=True).start()
+
+        append_btn = ttk.Button(dialog, text='Append', command=do_append)
+        append_btn.grid(row=4, column=1, pady=6)
+
+    menubar = tk.Menu(root)
+    tools_menu = tk.Menu(menubar, tearoff=0)
+    tools_menu.add_command(label='Append M4B files...', command=show_append_dialog)
+    tools_menu.add_command(label='Batch Queue...', command=lambda: show_batch_window())
+    menubar.add_cascade(label='Tools', menu=tools_menu)
+    root.config(menu=menubar)
 
     style = ttk.Style()
     style.theme_use('clam')
@@ -159,6 +261,36 @@ def start_gui():
     )
     detect_titles_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
 
+    starting_ch_label = tk.Label(settings_row2, text="  Starting Chapter #:")
+    starting_ch_label.pack(side=tk.LEFT, padx=(15, 5))
+    add_tooltip(starting_ch_label,
+                "Sets the chapter number of the first selected chapter in the\n"
+                "output file. Useful when splitting a book across multiple files.")
+
+    def check_chapter_range(event=None):
+        try:
+            value = int(chapter_entry.get())
+            if 0 <= value <= 99999:
+                chapter_entry.configure(foreground='')
+                return True
+            else:
+                chapter_entry.configure(foreground='red')
+        except ValueError:
+            chapter_entry.configure(foreground='red')
+        return False
+
+    chapter_entry = ttk.Entry(settings_row2, width=5)
+    chapter_entry.insert(0, "1")
+    chapter_entry.pack(side=tk.LEFT, padx=5)
+    chapter_entry.bind('<KeyRelease>', check_chapter_range)
+
+    def on_detect_titles_changed(*_):
+        state = 'disabled' if detect_titles.get() else 'normal'
+        chapter_entry.configure(state=state)
+
+    detect_titles.trace_add('write', on_detect_titles_changed)
+    on_detect_titles_changed()  # set initial state
+
     # Load saved settings
     config = load_config()
     if config.get('voice') in voices_emojified:
@@ -192,6 +324,411 @@ def start_gui():
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
+
+    def show_batch_window():
+        if not batch_queue:
+            messagebox.showinfo(
+                "Batch Queue",
+                "The batch queue is empty.\n\n"
+                "Load an epub, configure chapters/settings,\n"
+                "then click 'Add to Batch'.")
+            return
+
+        bw = tk.Toplevel(root)
+        bw.title("Batch Queue")
+        bw.geometry("800x500")
+        bw.resizable(True, True)
+
+        # Treeview
+        tree_frame = tk.Frame(bw)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        columns = ('num', 'title', 'voice', 'chapters', 'words', 'status')
+        tree = ttk.Treeview(tree_frame, columns=columns,
+                            show='headings', height=12)
+        tree.heading('num', text='#')
+        tree.heading('title', text='Title')
+        tree.heading('voice', text='Voice')
+        tree.heading('chapters', text='Chapters')
+        tree.heading('words', text='Words')
+        tree.heading('status', text='Status')
+        tree.column('num', width=40, stretch=False)
+        tree.column('title', width=250)
+        tree.column('voice', width=150)
+        tree.column('chapters', width=80, stretch=False)
+        tree.column('words', width=80, stretch=False)
+        tree.column('status', width=80, stretch=False)
+
+        tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical',
+                                    command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side='left', fill='both', expand=True)
+        tree_scroll.pack(side='right', fill='y')
+
+        def refresh_treeview():
+            tree.delete(*tree.get_children())
+            for i, job in enumerate(batch_queue):
+                sel = len(job.selected_chapter_indices)
+                total = len([c for c in job.chapters
+                             if len(c.extracted_text.split()) > 0])
+                tree.insert('', 'end', values=(
+                    i + 1, job.title, job.voice,
+                    f"{sel}/{total}",
+                    f"{job.total_words:,}",
+                    job.status))
+
+        refresh_treeview()
+
+        # Action buttons
+        btn_frame = tk.Frame(bw)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        def move_up():
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            if idx > 0:
+                batch_queue[idx], batch_queue[idx - 1] = (
+                    batch_queue[idx - 1], batch_queue[idx])
+                refresh_treeview()
+                tree.selection_set(tree.get_children()[idx - 1])
+
+        def move_down():
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            if idx < len(batch_queue) - 1:
+                batch_queue[idx], batch_queue[idx + 1] = (
+                    batch_queue[idx + 1], batch_queue[idx])
+                refresh_treeview()
+                tree.selection_set(tree.get_children()[idx + 1])
+
+        def remove_selected():
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            batch_queue.pop(idx)
+            refresh_treeview()
+            if not batch_queue:
+                bw.destroy()
+
+        def clear_all_jobs():
+            if messagebox.askyesno("Clear All",
+                                   "Remove all jobs from the queue?",
+                                   parent=bw):
+                batch_queue.clear()
+                bw.destroy()
+
+        ttk.Button(btn_frame, text='Move Up',
+                   command=move_up).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text='Move Down',
+                   command=move_down).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text='Remove',
+                   command=remove_selected).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text='Clear All',
+                   command=clear_all_jobs).pack(side=tk.LEFT, padx=3)
+
+        # Output directory
+        dir_frame = tk.Frame(bw)
+        dir_frame.pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(dir_frame, text="Output directory:").pack(side=tk.LEFT)
+        dir_var = tk.StringVar(value=last_directory or '')
+        dir_entry = ttk.Entry(dir_frame, textvariable=dir_var, width=50)
+        dir_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+
+        def browse_dir():
+            d = filedialog.askdirectory(parent=bw,
+                                        initialdir=dir_var.get() or None)
+            if d:
+                dir_var.set(d)
+
+        ttk.Button(dir_frame, text='Browse',
+                   command=browse_dir).pack(side=tk.LEFT, padx=3)
+
+        # Progress
+        prog_frame = tk.Frame(bw)
+        prog_frame.pack(fill=tk.X, padx=10, pady=5)
+        batch_progress = ttk.Progressbar(prog_frame, orient='horizontal',
+                                         mode='determinate')
+        batch_progress.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
+        batch_status = tk.Label(prog_frame, text="Ready")
+        batch_status.pack(side=tk.LEFT)
+
+        # Start / Cancel
+        action_frame = tk.Frame(bw)
+        action_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        batch_cancel = threading.Event()
+
+        def start_batch():
+            output_dir = dir_var.get().strip()
+            if not output_dir:
+                messagebox.showwarning("Warning",
+                                       "Please select an output directory.",
+                                       parent=bw)
+                return
+            if not Path(output_dir).is_dir():
+                messagebox.showwarning("Warning",
+                                       "Output directory does not exist.",
+                                       parent=bw)
+                return
+
+            start_btn.configure(state='disabled')
+            cancel_btn.configure(state='normal')
+            batch_cancel.clear()
+
+            def run():
+                total_jobs = len(batch_queue)
+                jobs_completed = 0
+                jobs_failed = 0
+                failed_jobs = []
+
+                def set_bprog(value):
+                    bw.after(0, lambda v=value:
+                             batch_progress.configure(value=v))
+
+                def set_bstat(text):
+                    bw.after(0, lambda t=text:
+                             batch_status.config(text=t))
+
+                for job_idx, job in enumerate(batch_queue):
+                    if batch_cancel.is_set():
+                        job.status = "Cancelled"
+                        bw.after(0, refresh_treeview)
+                        break
+
+                    job.status = "Converting"
+                    bw.after(0, refresh_treeview)
+
+                    try:
+                        selected_chapters = [
+                            job.chapters[i]
+                            for i in job.selected_chapter_indices]
+                        voice = deemojify_voice(job.voice)
+                        speed_val = job.speed
+                        chapter_gap = float(job.chapter_gap)
+                        set_gpu_acceleration(job.gpu_acceleration)
+
+                        output_path = str(
+                            Path(output_dir)
+                            / (Path(job.file_path).stem + '.m4b'))
+                        title = job.title
+                        creator = job.author
+                        chapter_titles = job.chapter_titles
+                        chapter_num = job.starting_chapter
+
+                        wav_dir = Path(job.file_path).parent
+                        stem = Path(job.file_path).stem
+
+                        wav_files = []
+                        all_wav = [
+                            str(wav_dir / f'{stem}_chapter_{i}.wav')
+                            for i in range(1, len(selected_chapters) + 1)]
+                        all_m4a = [
+                            str(wav_dir / f'{stem}_chapter_{i}_enc.m4a')
+                            for i in range(1, len(selected_chapters) + 1)]
+                        encode_futures = {}
+                        encode_executor = ThreadPoolExecutor(max_workers=1)
+
+                        job_start_pct = (job_idx / total_jobs) * 100
+                        job_end_pct = ((job_idx + 1) / total_jobs) * 100
+                        steps = len(selected_chapters) + 1
+
+                        word_counts = [len(ch.extracted_text.split())
+                                       for ch in selected_chapters]
+                        total_words = sum(word_counts)
+                        words_done = 0
+                        start_time = time.time()
+                        prefix = f"[{job_idx + 1}/{total_jobs}]"
+
+                        try:
+                            for i, chapter in enumerate(
+                                    selected_chapters, start=1):
+                                if batch_cancel.is_set():
+                                    break
+
+                                text = chapter.extracted_text
+                                if i == 1:
+                                    text = (f"{title} by {creator}.\n"
+                                            f"{text}")
+                                wav_fn = str(
+                                    wav_dir / f'{stem}_chapter_{i}.wav')
+                                m4a_fn = str(
+                                    wav_dir
+                                    / f'{stem}_chapter_{i}_enc.m4a')
+
+                                eta_str = ""
+                                if words_done > 0:
+                                    elapsed = time.time() - start_time
+                                    wps = words_done / elapsed
+                                    remaining = (
+                                        (total_words - words_done) / wps)
+                                    if remaining >= 60:
+                                        eta_str = (
+                                            f" (~{int(remaining / 60)}"
+                                            f" min left)")
+                                    else:
+                                        eta_str = (
+                                            f" (~{int(remaining)}s left)")
+
+                                set_bstat(
+                                    f"{prefix} {stem}: ch {i}/"
+                                    f"{len(selected_chapters)}{eta_str}")
+
+                                cur_step = i
+                                ch_s = job_start_pct + (
+                                    (cur_step / steps)
+                                    * (job_end_pct - job_start_pct))
+                                ch_e = job_start_pct + (
+                                    ((cur_step + 1) / steps)
+                                    * (job_end_pct - job_start_pct))
+                                est_segs = max(
+                                    len(text.split('\n\n\n')), 1)
+
+                                def on_seg(seg_count, s=ch_s,
+                                           e=ch_e, est=est_segs):
+                                    frac = min(seg_count / est, 0.95)
+                                    set_bprog(s + frac * (e - s))
+
+                                try:
+                                    duration = convert_text_to_wav_file(
+                                        text, voice, speed_val, wav_fn,
+                                        on_segment=on_seg,
+                                        trailing_silence=chapter_gap)
+                                    if duration is not None:
+                                        wav_files.append(wav_fn)
+                                        encode_futures[wav_fn] = (
+                                            encode_executor.submit(
+                                                encode_chapter_to_m4a,
+                                                wav_fn, m4a_fn),
+                                            m4a_fn)
+                                    else:
+                                        print(
+                                            f"{stem} ch {i}: no audio",
+                                            file=sys.stderr)
+                                except Exception as e:
+                                    print(
+                                        f"{stem} ch {i} failed: {e}",
+                                        file=sys.stderr)
+                                words_done += word_counts[i - 1]
+
+                            if batch_cancel.is_set():
+                                job.status = "Cancelled"
+                                bw.after(0, refresh_treeview)
+                                continue
+
+                            if not wav_files:
+                                job.status = "Failed"
+                                jobs_failed += 1
+                                failed_jobs.append(
+                                    (job.title, "No chapters converted"))
+                                bw.after(0, refresh_treeview)
+                                continue
+
+                            set_bstat(
+                                f"{prefix} {stem}: creating m4b...")
+                            m4a_files = []
+                            for wn in wav_files:
+                                future, m4a_name = encode_futures[wn]
+                                future.result()
+                                m4a_files.append(m4a_name)
+
+                            converted_titles = []
+                            for ci, ch in enumerate(selected_chapters):
+                                wn = str(
+                                    wav_dir
+                                    / f'{stem}_chapter_{ci + 1}.wav')
+                                if (wn in wav_files
+                                        and chapter_titles is not None):
+                                    converted_titles.append(
+                                        chapter_titles[ci])
+
+                            cover_full = get_cover_image(
+                                job.book, False)
+
+                            def m4b_prog(pct, s=job_start_pct,
+                                         e=job_end_pct):
+                                overall = s + (pct / 100) * (e - s)
+                                set_bprog(overall)
+
+                            create_m4b(
+                                m4a_files, output_path, cover_full,
+                                title, creator, chapter_num,
+                                converted_titles or None,
+                                progress_callback=m4b_prog,
+                                preencoded=True)
+
+                            job.status = "Done"
+                            jobs_completed += 1
+
+                        finally:
+                            encode_executor.shutdown(wait=True)
+                            if wav_files:
+                                time.sleep(2)
+                                for wf in all_wav:
+                                    for attempt in range(3):
+                                        try:
+                                            Path(wf).unlink(
+                                                missing_ok=True)
+                                            break
+                                        except OSError:
+                                            if attempt < 2:
+                                                time.sleep(2)
+                            for mf in all_m4a:
+                                Path(mf).unlink(missing_ok=True)
+
+                        bw.after(0, refresh_treeview)
+
+                    except Exception as e:
+                        job.status = "Failed"
+                        jobs_failed += 1
+                        failed_jobs.append((job.title, str(e)))
+                        print(f"Batch failed: {job.file_path}: {e}",
+                              file=sys.stderr)
+                        bw.after(0, refresh_treeview)
+
+                # Summary
+                batch_cancel.clear()
+
+                def show_done():
+                    set_bprog(100)
+                    start_btn.configure(state='normal')
+                    cancel_btn.configure(state='disabled')
+                    msg = (f"Completed: {jobs_completed}\n"
+                           f"Failed: {jobs_failed}")
+                    if failed_jobs:
+                        msg += "\n\nFailed:"
+                        for name, err in failed_jobs:
+                            msg += f"\n  - {name}: {err}"
+                    if jobs_failed > 0:
+                        messagebox.showwarning("Batch Complete", msg,
+                                               parent=bw)
+                    else:
+                        messagebox.showinfo("Batch Complete", msg,
+                                            parent=bw)
+                    # Remove completed jobs
+                    for j in list(batch_queue):
+                        if j.status == "Done":
+                            batch_queue.remove(j)
+                    refresh_treeview()
+
+                bw.after(0, show_done)
+
+            threading.Thread(target=run, daemon=True).start()
+
+        def cancel_batch():
+            batch_cancel.set()
+            batch_status.config(text="Cancelling...")
+
+        start_btn = ttk.Button(action_frame, text='Start Batch',
+                               command=start_batch)
+        start_btn.pack(side=tk.RIGHT, padx=5)
+        cancel_btn = ttk.Button(action_frame, text='Cancel',
+                                command=cancel_batch, state='disabled')
+        cancel_btn.pack(side=tk.RIGHT, padx=5)
 
     ttk.Separator(root, orient='horizontal').pack(fill='x', padx=5, pady=2)
 
@@ -344,6 +881,58 @@ def start_gui():
                             handle_chapter_click(ch, pl))
 
     current_file_path = ''
+    batch_queue = []
+
+    def add_to_batch():
+        if not current_file_path:
+            messagebox.showwarning("Warning",
+                                   "Please select an epub file first.")
+            return
+
+        selected_indices = []
+        for i, chapter in enumerate(chapters):
+            if chapter in checkbox_vars and checkbox_vars[chapter].get():
+                selected_indices.append(i)
+        if not selected_indices:
+            selected_indices = list(range(len(chapters)))
+
+        titles = None
+        if detect_titles.get():
+            selected_chs = [chapters[i] for i in selected_indices]
+            titles = get_chapter_titles(book, selected_chs)
+
+        try:
+            starting_ch = int(chapter_entry.get())
+        except ValueError:
+            starting_ch = 1
+
+        total_words = sum(
+            len(chapters[i].extracted_text.split())
+            for i in selected_indices
+        )
+
+        job = BatchJob(
+            file_path=current_file_path,
+            book=book,
+            chapters=list(chapters),
+            selected_chapter_indices=selected_indices,
+            voice=voice_combo.get(),
+            speed=speed_entry.get(),
+            chapter_gap=gap_entry.get(),
+            gpu_acceleration=gpu_acceleration.get(),
+            detect_titles=detect_titles.get(),
+            starting_chapter=starting_ch,
+            chapter_titles=titles,
+            title=get_title(book),
+            author=get_author(book),
+            total_words=total_words,
+        )
+        batch_queue.append(job)
+        messagebox.showinfo(
+            "Batch",
+            f"Added '{job.title}' to batch queue.\n"
+            f"Queue now has {len(batch_queue)} job(s).\n\n"
+            f"Open Tools > Batch Queue... to manage and start.")
 
     def load_book_file(file_path):
         nonlocal last_directory, current_file_path
@@ -716,29 +1305,6 @@ def start_gui():
     )
     clear_all_button.pack(side=tk.LEFT, padx=5)
 
-    starting_ch_label = tk.Label(button_row, text="  Starting Chapter #:")
-    starting_ch_label.pack(side=tk.LEFT, padx=(15, 5))
-    add_tooltip(starting_ch_label,
-                "Sets the chapter number of the first selected chapter in the\n"
-                "output file. Useful when splitting a book across multiple files.")
-
-    def check_chapter_range(event=None):
-        try:
-            value = int(chapter_entry.get())
-            if 0 <= value <= 99999:
-                chapter_entry.configure(foreground='')
-                return True
-            else:
-                chapter_entry.configure(foreground='red')
-        except ValueError:
-            chapter_entry.configure(foreground='red')
-        return False
-
-    chapter_entry = ttk.Entry(button_row, width=5)
-    chapter_entry.insert(0, "1")
-    chapter_entry.pack(side=tk.LEFT, padx=5)
-    chapter_entry.bind('<KeyRelease>', check_chapter_range)
-
     cancel_button = ttk.Button(
         button_row,
         text='Cancel',
@@ -752,6 +1318,13 @@ def start_gui():
         command=convert,
     )
     start_convert_button.pack(side=tk.RIGHT, padx=5)
+
+    add_to_batch_button = ttk.Button(
+        button_row,
+        text='Add to Batch',
+        command=add_to_batch,
+    )
+    add_to_batch_button.pack(side=tk.RIGHT, padx=5)
 
     # Progress row
     progress_frame = tk.Frame(bottom_frame)
