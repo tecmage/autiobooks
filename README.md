@@ -1,5 +1,5 @@
 # Autiobooks: Automatically convert epubs to audiobooks
-[![Installing via pip and running](https://github.com/plusuncold/autiobooks/actions/workflows/pip-install.yaml/badge.svg)](https://github.com/plusuncold/autiobooks/actions/workflows/pip-install.yaml)
+[![CI](https://github.com/tecmage/autiobooks/actions/workflows/ci.yml/badge.svg)](https://github.com/tecmage/autiobooks/actions/workflows/ci.yml)
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/autiobooks)
 ![PyPI - Version](https://img.shields.io/pypi/v/autiobooks)
 
@@ -9,7 +9,7 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
-It supports American, British English, French, Korean, Japanese and Mandarin (though we only-support English, for now) and a wide range of different [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody.
+Kokoro supports multiple languages, but Autiobooks currently exposes only American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md). Additional languages may be enabled in future releases.
 
 PRs are welcome!
 

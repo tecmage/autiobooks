@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import threading
 import warnings
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 from kokoro import KPipeline
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from .text_processing import normalize_text
+from .voices_lang import get_language_from_voice
 
 # Suppress torch warnings from Kokoro's model internals
 warnings.filterwarnings('ignore', message='.*dropout option adds dropout.*')
@@ -23,10 +25,10 @@ SAMPLE_RATE = 24000
 def set_gpu_acceleration(enabled):
     if enabled:
         if torch.cuda.is_available():
-            print('CUDA GPU available')
+            print('CUDA GPU available', file=sys.stderr)
             torch.set_default_device('cuda')
         else:
-            print('CUDA GPU not available. Defaulting to CPU')
+            print('CUDA GPU not available. Defaulting to CPU', file=sys.stderr)
 
 
 def get_gpu_acceleration_available():
@@ -34,6 +36,7 @@ def get_gpu_acceleration_available():
 
 
 _pipeline_cache = {}
+_pipeline_lock = threading.Lock()
 
 
 def create_pipeline(lang_code):
@@ -55,9 +58,10 @@ def create_pipeline(lang_code):
 
 def get_pipeline(lang_code):
     """Get or create a cached KPipeline for the given language code."""
-    if lang_code not in _pipeline_cache:
-        _pipeline_cache[lang_code] = create_pipeline(lang_code)
-    return _pipeline_cache[lang_code]
+    with _pipeline_lock:
+        if lang_code not in _pipeline_cache:
+            _pipeline_cache[lang_code] = create_pipeline(lang_code)
+        return _pipeline_cache[lang_code]
 
 
 def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
@@ -117,19 +121,19 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
         # FFmpeg arguments for cover image if present
         cover_image_args = []
         cover_image_path = None
-        if cover_image:
-            cover_image_file = NamedTemporaryFile("wb", delete=False)
-            cover_image_file.write(cover_image)
-            cover_image_file.close()
-            cover_image_path = cover_image_file.name
-            cover_image_args = [
-                "-i", cover_image_path,
-                '-disposition:v', 'attached_pic'
-            ]
-
-        audio_codec_args = ['-c:a', 'copy'] if preencoded else ['-c:a', 'aac', '-b:a', '64k']
-        total_duration_us = sum(durations) * 1_000_000
         try:
+            if cover_image:
+                cover_image_file = NamedTemporaryFile("wb", delete=False)
+                cover_image_file.write(cover_image)
+                cover_image_file.close()
+                cover_image_path = cover_image_file.name
+                cover_image_args = [
+                    "-i", cover_image_path,
+                    '-disposition:v', 'attached_pic'
+                ]
+
+            audio_codec_args = ['-c:a', 'copy'] if preencoded else ['-c:a', 'aac', '-b:a', '64k']
+            total_duration_us = sum(durations) * 1_000_000
             proc = subprocess.Popen([
                 'ffmpeg', '-y',
                 '-safe', '0',
@@ -257,47 +261,44 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
             write_chapters(append_chapters, offset_ms=base_duration_ms)
 
         total_duration_us = (base_duration + append_duration) * 1_000_000
-        try:
-            proc = subprocess.Popen([
-                'ffmpeg', '-y',
-                '-safe', '0',
-                '-f', 'concat',
-                '-i', concat_file,        # input 0: concatenated audio
-                '-i', chapters_file,      # input 1: merged metadata + chapters
-                '-i', base_path,          # input 2: cover art source
-                '-map', '0:a',
-                '-map', '2:v?',
-                '-c', 'copy',
-                '-disposition:v', 'attached_pic',
-                '-map_metadata', '1',
-                '-movflags', '+disable_chpl',
-                '-progress', 'pipe:1',
-                '-nostats',
-                output_path
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([
+            'ffmpeg', '-y',
+            '-safe', '0',
+            '-f', 'concat',
+            '-i', concat_file,        # input 0: concatenated audio
+            '-i', chapters_file,      # input 1: merged metadata + chapters
+            '-i', base_path,          # input 2: cover art source
+            '-map', '0:a',
+            '-map', '2:v?',
+            '-c', 'copy',
+            '-disposition:v', 'attached_pic',
+            '-map_metadata', '1',
+            '-movflags', '+disable_chpl',
+            '-progress', 'pipe:1',
+            '-nostats',
+            output_path
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-            stderr_buf = []
-            stderr_thread = threading.Thread(
-                target=lambda: stderr_buf.append(proc.stderr.read()))
-            stderr_thread.start()
+        stderr_buf = []
+        stderr_thread = threading.Thread(
+            target=lambda: stderr_buf.append(proc.stderr.read()))
+        stderr_thread.start()
 
-            for line in proc.stdout:
-                if progress_callback and line.startswith('out_time_ms='):
-                    try:
-                        us = int(line.split('=', 1)[1])
-                        if total_duration_us > 0:
-                            pct = min(100, int(us / total_duration_us * 100))
-                            progress_callback(pct)
-                    except ValueError:
-                        pass
+        for line in proc.stdout:
+            if progress_callback and line.startswith('out_time_ms='):
+                try:
+                    us = int(line.split('=', 1)[1])
+                    if total_duration_us > 0:
+                        pct = min(100, int(us / total_duration_us * 100))
+                        progress_callback(pct)
+                except ValueError:
+                    pass
 
-            proc.wait()
-            stderr_thread.join()
-            if proc.returncode != 0:
-                stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
-                raise RuntimeError(f"FFmpeg append failed:\n{stderr_text}")
-        finally:
-            pass  # TemporaryDirectory handles cleanup
+        proc.wait()
+        stderr_thread.join()
+        if proc.returncode != 0:
+            stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
+            raise RuntimeError(f"FFmpeg append failed:\n{stderr_text}")
 
 
 def probe_duration(file_name):
@@ -331,7 +332,7 @@ def convert_text_to_wav_file(text, voice, speed, filename,
                              trailing_silence=0):
     if Path(filename).exists():
         Path(filename).unlink()
-    text = normalize_text(text)
+    text = normalize_text(text, lang=get_language_from_voice(voice))
     audio = gen_audio_segments(text, voice, speed, split_pattern, on_segment)
     if audio:
         audio = np.concatenate(audio)

@@ -20,11 +20,12 @@ UNICODE_REPLACEMENTS = {
 }
 
 
-def normalize_unicode(text):
+def normalize_unicode(text, is_english=True):
     for char, replacement in UNICODE_REPLACEMENTS.items():
         text = text.replace(char, replacement)
-    # En-dash between numbers: "10–20" → "10 to 20"
-    text = re.sub(r'(\d)\u2013(\d)', r'\1 to \2', text)
+    # En-dash between numbers: "10–20" → "10 to 20" (English only)
+    if is_english:
+        text = re.sub(r'(\d)\u2013(\d)', r'\1 to \2', text)
     # Remaining en-dashes
     text = text.replace('\u2013', ' - ')
     return text
@@ -157,7 +158,7 @@ EMAIL_PATTERN = re.compile(
 )
 
 
-def clean_special_characters(text):
+def clean_special_characters(text, is_english=True):
     # Remove URLs and emails
     text = URL_PATTERN.sub('', text)
     text = EMAIL_PATTERN.sub('', text)
@@ -165,9 +166,9 @@ def clean_special_characters(text):
     # Remove scene break markers (3+ repeated special characters, e.g. ***, ---, ~~~, ===)
     text = re.sub(r'[\*\-\~\=\_\#\+\.]{3,}', '', text)
 
-    # Replace symbols
+    # Replace symbols (English words for English; strip to space otherwise)
     for symbol, replacement in SYMBOL_REPLACEMENTS.items():
-        text = text.replace(symbol, replacement)
+        text = text.replace(symbol, replacement if is_english else ' ')
 
     # Collapse multiple spaces
     text = re.sub(r' {2,}', ' ', text)
@@ -181,10 +182,19 @@ def clean_special_characters(text):
 
 # --- Main entry point ---
 
-def normalize_text(text):
-    """Normalize text before sending to TTS."""
-    text = normalize_unicode(text)
-    text = expand_abbreviations(text)
-    text = expand_roman_numerals(text)
-    text = clean_special_characters(text)
+def normalize_text(text, lang='en-us'):
+    """Normalize text before sending to TTS.
+
+    English-specific transformations (abbreviation expansion, roman numeral
+    expansion, symbol-to-English-word replacement, en-dash-to-'to' between
+    numbers) are applied only when `lang` starts with 'en'. For other
+    languages, symbols are stripped to spaces instead of replaced with English
+    words.
+    """
+    is_english = lang.startswith('en')
+    text = normalize_unicode(text, is_english=is_english)
+    if is_english:
+        text = expand_abbreviations(text)
+        text = expand_roman_numerals(text)
+    text = clean_special_characters(text, is_english=is_english)
     return text

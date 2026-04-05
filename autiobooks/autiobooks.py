@@ -21,7 +21,7 @@ import numpy as np
 import shutil
 import tempfile
 import os
-from .voices_lang import voices, voices_emojified, deemojify_voice
+from .voices_lang import voices, voices_emojified, deemojify_voice, get_language_from_voice
 
 PREVIEW_FILE = os.path.join(tempfile.gettempdir(), "autiobooks_preview.wav")
 
@@ -180,7 +180,7 @@ def start_gui():
     if not shutil.which('ffmpeg'):
         messagebox.showwarning("Warning",
                                "ffmpeg not found. Please install ffmpeg to" +
-                               " create mp3 and m4b audiobook files.")
+                               " create m4b audiobook files.")
         exit(1)
 
     # Row 1: Voice, speed, and gap settings
@@ -305,6 +305,11 @@ def start_gui():
         gpu_acceleration.set(True)
     if 'detect_titles' in config:
         detect_titles.set(config['detect_titles'])
+    if config.get('starting_chapter'):
+        chapter_entry.configure(state='normal')
+        chapter_entry.delete(0, tk.END)
+        chapter_entry.insert(0, config['starting_chapter'])
+        on_detect_titles_changed()
     last_directory = config.get('last_directory', '')
 
     def get_current_config():
@@ -314,11 +319,14 @@ def start_gui():
             'chapter_gap': gap_entry.get(),
             'gpu_acceleration': gpu_acceleration.get(),
             'detect_titles': detect_titles.get(),
+            'starting_chapter': chapter_entry.get(),
             'last_directory': last_directory,
         }
 
     def on_close():
-        pygame.mixer.music.stop()
+        if audio_available:
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
         Path(PREVIEW_FILE).unlink(missing_ok=True)
         save_config(get_current_config())
         root.destroy()
@@ -732,8 +740,15 @@ def start_gui():
 
     ttk.Separator(root, orient='horizontal').pack(fill='x', padx=5, pady=2)
 
-    pygame.mixer.init()
-    pygame.mixer.music.set_volume(0.7)
+    audio_available = False
+    try:
+        pygame.mixer.init()
+        pygame.mixer.music.set_volume(0.7)
+        audio_available = True
+    except pygame.error as e:
+        messagebox.showwarning("Audio Warning",
+                               f"Could not initialize audio preview: {e}\n\n"
+                               "TTS conversion will still work.")
 
     book_frame = tk.Frame(root)
     book_frame.grid_columnconfigure(0, weight=1)
@@ -771,7 +786,8 @@ def start_gui():
             return
 
         if playing_sample:
-            pygame.mixer.music.stop()
+            if audio_available:
+                pygame.mixer.music.stop()
             playing_sample = False
             play_label.config(text="▶️")
             return
@@ -780,12 +796,12 @@ def start_gui():
         if not text:
             return
 
-        text = normalize_text(text)
-        generating_preview = True
-        play_label.config(text="...")
-
         voice = deemojify_voice(voice_combo.get())
         speed = float(speed_entry.get())
+
+        text = normalize_text(text, lang=get_language_from_voice(voice))
+        generating_preview = True
+        play_label.config(text="...")
 
         def generate():
             nonlocal generating_preview
@@ -806,7 +822,7 @@ def start_gui():
 
     def play_preview(play_label):
         global playing_sample
-        if not Path(PREVIEW_FILE).exists():
+        if not audio_available or not Path(PREVIEW_FILE).exists():
             play_label.config(text="▶️")
             return
         playing_sample = True
