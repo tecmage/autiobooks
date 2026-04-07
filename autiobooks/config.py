@@ -4,6 +4,8 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / '.autiobooks'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
+BIN_DIR = CONFIG_DIR / 'bin'
+CUDA_DIR = CONFIG_DIR / 'cuda'
 
 
 def load_config():

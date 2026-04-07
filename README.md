@@ -18,13 +18,16 @@ PRs are welcome!
 - **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
 - **Multiple voices** — choose from a range of American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody
 - **Chapter selection** — select which chapters to convert, with word counts and text previews
+- **Drag and drop** — drag an epub file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
 - **Chapter title detection** — automatically extracts chapter titles from the epub's table of contents or headings (can be toggled off)
 - **Voice preview** — listen to a sample of any chapter before converting the full book
 - **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them
 - **GPU acceleration** — CUDA support for significantly faster conversion on NVIDIA GPUs
-- **Adjustable settings** — reading speed, chapter gap duration, and starting chapter number
-- **Settings persistence** — voice, speed, gap, and other preferences are saved between sessions
+- **Adjustable settings** — reading speed, chapter gap duration, bitrate (64/128/192k), VBR mode, and starting chapter number
+- **Editable metadata** — correct the title and author before converting
+- **Settings persistence** — voice, speed, gap, bitrate, and other preferences are saved between sessions
 - **Cover art** — embeds the epub's cover image into the output `.m4b` file
+- **Append M4B** — concatenate two `.m4b` files with merged chapter markers via the Tools menu
 - **Docker support** — run in a container with X11 forwarding
 
 ## Requirements
@@ -37,6 +40,18 @@ PRs are welcome!
 
 ## Changelog
 
+#### 1.6.0
+
+**Windows Builds:**
+- Two standalone Windows executables via PyInstaller:
+  - **CPU build** (`dist/autiobooks/autiobooks.exe`): CPU-only torch, GPU checkbox disabled (grayed out)
+  - **CUDA build** (`dist-cuda/autiobooks-cuda/autiobooks-cuda.exe`): Full GPU acceleration, checkbox enabled by default
+- Bundled ffmpeg and espeak-ng (downloaded at build time)
+- Bundled spacy + en_core_web_sm for proper NLP tokenization (both builds)
+- GPU checkbox shows but is disabled on CPU build with tooltip explaining CUDA build is needed
+- "Don't ask again" preference for CUDA prompt (saved to config)
+- Tools > Download CUDA Support... for manual download (bypasses "Don't ask again")
+
 #### 1.5.0
 
 **New features:**
@@ -47,16 +62,33 @@ PRs are welcome!
 
 #### 1.4.0
 
+**New features:**
+- **Configurable bitrate** — choose 64k, 128k, or 192k AAC output (default 64k); setting is saved between sessions
+- **VBR mode** — new VBR checkbox uses AAC variable bitrate (`-q:a 2`, ~96–128 kbps) for better quality-to-size ratio; disables the bitrate dropdown when active
+- **Editable metadata** — a dialog before conversion lets you correct the title and author extracted from the epub
+- **Clear WAVs button** — new button in the chapter list toolbar deletes leftover `_chapter_*.wav` files for the current book without navigating to the filesystem
+- **Chapter numbers** — chapter list now shows a sequence number (1, 2, 3…) before each title, counting only non-empty chapters
+
 **GUI improvements:**
-- Select all / clear all buttons for chapter selection
-- Starting chapter number field with validation and tooltip (useful when splitting a book across multiple files)
+- Chapter list footer shows total selected chapters, word count, and estimated listening duration (updates live as checkboxes or speed change)
+- Save As dialog remembers the last-used output directory separately from the epub input directory
+- Append M4B dialog shows chapter count and duration for each selected file after browsing
+- Append M4B dialog validates that input files exist and are `.m4b` before starting
+
+**Bug fixes:**
+- Cancelling a conversion now also cancels any queued background AAC encoding jobs, not just the TTS loop
 
 #### 1.3.0
 
 **New features:**
-- Drag-and-drop epub file support (optional `tkinterdnd2` dependency)
-- Tools menu added with "Append M4B files..." for merging two audiobooks into one
-- Tooltip system for UI hints
+- **Append M4B** — new Tools menu with "Append M4B files..." dialog to concatenate two m4b files; chapter markers from both files are merged with correct timestamps, cover art and metadata are taken from the base file
+
+**GUI improvements:**
+- Starting Chapter # field moved next to the Detect chapter titles checkbox
+- Starting Chapter # field is disabled while Detect chapter titles is checked (the two are mutually exclusive)
+
+**Bug fixes:**
+- Fixed chapter markers being silently truncated at 255 in the output m4b file (caused by the Nero `chpl` atom's 8-bit chapter count limit; now suppressed in favour of the standard MP4 chapter track)
 
 #### 1.2.3
 
@@ -203,6 +235,11 @@ cd autiobooks
 pip install .
 ```
 
+To also enable drag-and-drop support:
+```bash
+pip install ".[dnd]"
+```
+
 ### 3. Run
 
 ```bash
@@ -257,6 +294,56 @@ If you have an NVIDIA GPU and [nvidia-container-toolkit](https://docs.nvidia.com
 |--------|---------|
 | `./books` | Epub input and audiobook output |
 | `autiobooks-config` | Persisted settings between runs |
+
+## Windows Builds
+
+Pre-built Windows executables are available for download from the releases page. Two variants are provided:
+
+| Build | File | Description |
+|-------|------|-------------|
+| CPU | `autiobooks.exe` | CPU-only, smaller (~1.5GB total), GPU checkbox disabled |
+| CUDA | `autiobooks-cuda.exe` | Full GPU acceleration (~5.5GB total), requires NVIDIA GPU |
+
+Both builds include bundled ffmpeg and espeak-ng, so no additional installation is required.
+
+### Building from Source
+
+If you need to rebuild the Windows executables, you'll need:
+
+- **Python 3.12** (64-bit)
+- **Windows 10/11**
+- **Git** for cloning the repository
+
+**Build tools** (installed automatically by the scripts):
+- [scoop](https://scoop.sh/) or [chocolatey](https://chocolatey.org/) for espeak-ng
+- ~2-6GB free disk space depending on build type
+
+**CPU Build:**
+```cmd
+cd windows
+build.bat
+```
+Output: `windows/dist/autiobooks/autiobooks.exe`
+
+**CUDA Build:**
+```cmd
+cd windows
+build-cuda.bat
+```
+Output: `windows/dist-cuda/autiobooks-cuda/autiobooks-cuda.exe`
+
+Both scripts will:
+1. Create a Python virtual environment
+2. Install all dependencies
+3. Download ffmpeg and espeak-ng
+4. Run PyInstaller
+5. Copy executables and DLLs to the output folder
+
+**Using the builds:**
+- Run the appropriate exe for your hardware
+- On the CPU build, the GPU checkbox is disabled with a tooltip explaining a CUDA build is needed
+- On first run with a CUDA build, you'll be prompted to download CUDA runtime (~2.5GB) if not already present
+- Use **Tools > Download CUDA Support** to manually download CUDA (bypasses the "Don't ask again" preference)
 
 ## Author
 by David Nesbitt, distributed under MIT license.

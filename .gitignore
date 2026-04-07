@@ -11,3 +11,11 @@ build
 *.egg-info
 .DS_Store
 .vscode
+
+# Windows build artifacts (inside windows/)
+windows/venv312*/
+windows/ffmpeg-master-latest-win64-gpl/
+windows/espeak-ng/
+windows/wheels/
+windows/kokoro_check/
+windows/nul

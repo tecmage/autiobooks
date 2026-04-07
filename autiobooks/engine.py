@@ -32,7 +32,12 @@ def set_gpu_acceleration(enabled):
 
 
 def get_gpu_acceleration_available():
-    return torch.cuda.is_available()
+    if torch.cuda.is_available():
+        return True
+    from .runtime import check_nvidia_gpu, _cuda_installed
+    if check_nvidia_gpu() and _cuda_installed():
+        return True
+    return False
 
 
 _pipeline_cache = {}
@@ -81,7 +86,7 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
 
 def create_m4b(chapter_files, output_path, cover_image, title, creator,
                chapter_num, chapter_titles=None, progress_callback=None,
-               known_durations=None, preencoded=False):
+               known_durations=None, preencoded=False, bitrate='64k', vbr=False):
     with TemporaryDirectory() as tempdir:
         # Create concat file listing chapter files
         concat_file = os.path.join(tempdir, 'concat.txt')
@@ -132,7 +137,12 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                     '-disposition:v', 'attached_pic'
                 ]
 
-            audio_codec_args = ['-c:a', 'copy'] if preencoded else ['-c:a', 'aac', '-b:a', '64k']
+            if preencoded:
+                audio_codec_args = ['-c:a', 'copy']
+            elif vbr:
+                audio_codec_args = ['-c:a', 'aac', '-q:a', '2']
+            else:
+                audio_codec_args = ['-c:a', 'aac', '-b:a', bitrate]
             total_duration_us = sum(durations) * 1_000_000
             proc = subprocess.Popen([
                 'ffmpeg', '-y',
@@ -175,17 +185,18 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 os.unlink(cover_image_path)
 
 
-def encode_chapter_to_m4a(wav_path, m4a_path):
+def encode_chapter_to_m4a(wav_path, m4a_path, bitrate='64k', vbr=False):
     """Encode a single WAV chapter to AAC/M4A.
 
     Intended to run in a background thread during TTS generation so that the
     final assembly step can do a fast stream-copy instead of re-encoding.
     """
+    quality_args = ['-q:a', '2'] if vbr else ['-b:a', bitrate]
     result = subprocess.run([
         'ffmpeg', '-y',
         '-i', wav_path,
         '-c:a', 'aac',
-        '-b:a', '64k',
+        *quality_args,
         m4a_path
     ], capture_output=True)
     if result.returncode != 0:

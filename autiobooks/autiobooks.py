@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import sys
+import platform
 import time
 import importlib.metadata
 import threading
@@ -12,6 +13,8 @@ from pathlib import Path
 from .engine import get_gpu_acceleration_available, gen_audio_segments
 from .engine import set_gpu_acceleration, convert_text_to_wav_file
 from .engine import create_m4b, encode_chapter_to_m4a, append_m4b
+from .engine import probe_duration, _probe_chapters
+from .runtime import ensure_cuda
 from .epub_parser import get_book, get_title, get_author, get_cover_image, get_chapter_titles
 from .text_processing import normalize_text
 from .config import load_config, save_config
@@ -51,6 +54,8 @@ class BatchJob:
     title: str = ""
     author: str = ""
     total_words: int = 0
+    bitrate: str = "64k"
+    vbr: bool = False
     status: str = "Queued"
 
 
@@ -93,26 +98,51 @@ def start_gui():
     def show_append_dialog():
         dialog = tk.Toplevel(root)
         dialog.title('Append M4B Files')
-        dialog.geometry('700x210')
+        dialog.geometry('700x250')
         dialog.resizable(False, False)
         dialog.grab_set()
 
         for row, label in enumerate(['Base file:', 'Append file:', 'Output file:']):
-            tk.Label(dialog, text=label).grid(row=row, column=0, sticky='e',
-                                              padx=10, pady=6)
+            tk.Label(dialog, text=label).grid(row=row * 2, column=0, sticky='e',
+                                              padx=10, pady=(6, 0))
         base_var = tk.StringVar()
         append_var = tk.StringVar()
         output_var = tk.StringVar()
 
         for row, var in enumerate([base_var, append_var, output_var]):
             ttk.Entry(dialog, textvariable=var, width=45).grid(
-                row=row, column=1, padx=5)
+                row=row * 2, column=1, padx=5, pady=(6, 0))
 
-        def browse_open(var):
+        base_info_label = tk.Label(dialog, text='', fg='#555555',
+                                   font=('Arial', 10))
+        base_info_label.grid(row=1, column=1, sticky='w', padx=5)
+
+        append_info_label = tk.Label(dialog, text='', fg='#555555',
+                                     font=('Arial', 10))
+        append_info_label.grid(row=3, column=1, sticky='w', padx=5)
+
+        def load_file_info(path, label):
+            """Probe an m4b file and update the info label in background."""
+            def run():
+                try:
+                    dur = probe_duration(path)
+                    chs = _probe_chapters(path)
+                    h, m = int(dur // 3600), int((dur % 3600) // 60)
+                    dur_str = f'{h}h {m}m' if h else f'{m}m'
+                    text = f'{len(chs)} chapter(s) · {dur_str}'
+                except Exception:
+                    text = 'could not read file'
+                if dialog.winfo_exists():
+                    dialog.after(0, lambda t=text: label.config(text=t))
+            threading.Thread(target=run, daemon=True).start()
+
+        def browse_open(var, info_label):
             p = filedialog.askopenfilename(
                 parent=dialog, filetypes=[('M4B files', '*.m4b')])
             if p:
                 var.set(p)
+                info_label.config(text='reading...')
+                load_file_info(p, info_label)
 
         def browse_save(var):
             p = filedialog.asksaveasfilename(
@@ -122,17 +152,17 @@ def start_gui():
                 var.set(p)
 
         ttk.Button(dialog, text='Browse',
-                   command=lambda: browse_open(base_var)).grid(
-            row=0, column=2, padx=5)
+                   command=lambda: browse_open(base_var, base_info_label)).grid(
+            row=0, column=2, padx=5, pady=(6, 0))
         ttk.Button(dialog, text='Browse',
-                   command=lambda: browse_open(append_var)).grid(
-            row=1, column=2, padx=5)
+                   command=lambda: browse_open(append_var, append_info_label)).grid(
+            row=2, column=2, padx=5, pady=(6, 0))
         ttk.Button(dialog, text='Browse',
                    command=lambda: browse_save(output_var)).grid(
-            row=2, column=2, padx=5)
+            row=4, column=2, padx=5, pady=(6, 0))
 
         status_label = tk.Label(dialog, text='')
-        status_label.grid(row=3, column=0, columnspan=3, pady=6)
+        status_label.grid(row=5, column=0, columnspan=3, pady=6)
 
         def do_append():
             base = base_var.get().strip()
@@ -142,6 +172,17 @@ def start_gui():
                 messagebox.showerror('Error', 'Please select all three files.',
                                      parent=dialog)
                 return
+            for path, label in [(base, 'Base'), (append, 'Append')]:
+                if not Path(path).exists():
+                    messagebox.showerror(
+                        'Error', f'{label} file does not exist:\n{path}',
+                        parent=dialog)
+                    return
+                if not path.lower().endswith('.m4b'):
+                    messagebox.showerror(
+                        'Error', f'{label} file must be an .m4b file.',
+                        parent=dialog)
+                    return
             append_btn.configure(state='disabled')
             status_label.config(text='Appending... 0%')
 
@@ -162,14 +203,7 @@ def start_gui():
             threading.Thread(target=run, daemon=True).start()
 
         append_btn = ttk.Button(dialog, text='Append', command=do_append)
-        append_btn.grid(row=4, column=1, pady=6)
-
-    menubar = tk.Menu(root)
-    tools_menu = tk.Menu(menubar, tearoff=0)
-    tools_menu.add_command(label='Append M4B files...', command=show_append_dialog)
-    tools_menu.add_command(label='Batch Queue...', command=lambda: show_batch_window())
-    menubar.add_cascade(label='Tools', menu=tools_menu)
-    root.config(menu=menubar)
+        append_btn.grid(row=6, column=1, pady=6)
 
     style = ttk.Style()
     style.theme_use('clam')
@@ -177,7 +211,11 @@ def start_gui():
     style.configure('Cancel.TButton', foreground='red')
 
     # check ffmpeg is installed
-    if not shutil.which('ffmpeg'):
+    if sys.platform == 'win32':
+        from .runtime import ensure_ffmpeg
+        if not ensure_ffmpeg(root):
+            exit(1)
+    elif not shutil.which('ffmpeg'):
         messagebox.showwarning("Warning",
                                "ffmpeg not found. Please install ffmpeg to" +
                                " create m4b audiobook files.")
@@ -218,7 +256,57 @@ def start_gui():
     speed_entry.pack(side=tk.LEFT, pady=5, padx=5)
     speed_entry.bind('<KeyRelease>', check_speed_range)
 
-    gap_label = tk.Label(settings_row1, text="Chapter gap (s):")
+    bitrate_label = tk.Label(settings_row1, text="Bitrate:")
+    bitrate_label.pack(side=tk.LEFT, pady=5, padx=15)
+
+    bitrate_combo = ttk.Combobox(
+        settings_row1,
+        values=['64k', '128k', '192k'],
+        state='readonly',
+        width=5,
+    )
+    bitrate_combo.set('64k')
+    bitrate_combo.pack(side=tk.LEFT, pady=5, padx=5)
+
+    use_vbr = tk.BooleanVar(value=False)
+    vbr_checkbox = tk.Checkbutton(settings_row1, text="VBR", variable=use_vbr)
+    vbr_checkbox.pack(side=tk.LEFT, pady=5, padx=5)
+    add_tooltip(vbr_checkbox,
+                "Variable bitrate: higher quality-to-size ratio.\n"
+                "Uses AAC VBR quality level 2 (roughly 96–128 kbps).")
+
+    def on_vbr_changed(*_):
+        bitrate_combo.configure(state='disabled' if use_vbr.get() else 'readonly')
+
+    use_vbr.trace_add('write', on_vbr_changed)
+
+    # Row 2: Checkboxes
+    settings_row2 = tk.Frame(root)
+    settings_row2.pack(pady=2, padx=5)
+
+    gpu_acceleration = tk.BooleanVar()
+    gpu_acceleration.set(False)
+    gpu_acceleration_checkbox = tk.Checkbutton(
+        settings_row2,
+        text="Enable GPU acceleration",
+        variable=gpu_acceleration,
+        state='disabled'
+    )
+    if platform.system() == "Windows":
+        ensure_cuda(root)
+    if get_gpu_acceleration_available():
+        import torch
+        if torch.cuda.is_available():
+            gpu_acceleration_checkbox.config(state='normal')
+            gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
+        else:
+            add_tooltip(gpu_acceleration_checkbox,
+                        "GPU acceleration requires a CUDA-enabled build.\n"
+                        "The standalone Windows build uses CPU-only torch.\n"
+                        "For GPU support, use the CUDA-enabled version.")
+            gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
+
+    gap_label = tk.Label(settings_row2, text="Chapter gap (s):")
     gap_label.pack(side=tk.LEFT, pady=5, padx=15)
 
     def check_gap_range(event=None):
@@ -233,24 +321,10 @@ def start_gui():
             gap_entry.configure(foreground='red')
         return False
 
-    gap_entry = ttk.Entry(settings_row1, width=5)
+    gap_entry = ttk.Entry(settings_row2, width=5)
     gap_entry.insert(0, "2.0")
     gap_entry.pack(side=tk.LEFT, pady=5, padx=5)
     gap_entry.bind('<KeyRelease>', check_gap_range)
-
-    # Row 2: Checkboxes
-    settings_row2 = tk.Frame(root)
-    settings_row2.pack(pady=2, padx=5)
-
-    gpu_acceleration = tk.BooleanVar()
-    gpu_acceleration.set(False)
-    gpu_acceleration_checkbox = tk.Checkbutton(
-        settings_row2,
-        text="Enable GPU acceleration",
-        variable=gpu_acceleration
-    )
-    if get_gpu_acceleration_available():
-        gpu_acceleration_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
 
     detect_titles = tk.BooleanVar()
     detect_titles.set(True)
@@ -260,6 +334,19 @@ def start_gui():
         variable=detect_titles
     )
     detect_titles_checkbox.pack(side=tk.LEFT, pady=5, padx=15)
+
+    menubar = tk.Menu(root)
+    tools_menu = tk.Menu(menubar, tearoff=0)
+    tools_menu.add_command(label='Append M4B files...', command=show_append_dialog)
+    tools_menu.add_command(label='Batch Queue...', command=lambda: show_batch_window())
+    if platform.system() == "Windows":
+        from .runtime import check_nvidia_gpu
+        if check_nvidia_gpu():
+            from .runtime import download_cuda_from_menu
+            tools_menu.add_command(label='Download CUDA Support...',
+                                   command=lambda: download_cuda_from_menu(root, gpu_acceleration))
+    menubar.add_cascade(label='Tools', menu=tools_menu)
+    root.config(menu=menubar)
 
     starting_ch_label = tk.Label(settings_row2, text="  Starting Chapter #:")
     starting_ch_label.pack(side=tk.LEFT, padx=(15, 5))
@@ -301,16 +388,21 @@ def start_gui():
     if config.get('chapter_gap'):
         gap_entry.delete(0, tk.END)
         gap_entry.insert(0, config['chapter_gap'])
-    if config.get('gpu_acceleration'):
+    if config.get('gpu_acceleration') and get_gpu_acceleration_available():
         gpu_acceleration.set(True)
     if 'detect_titles' in config:
         detect_titles.set(config['detect_titles'])
+    if config.get('bitrate') in ('64k', '128k', '192k'):
+        bitrate_combo.set(config['bitrate'])
+    if config.get('vbr'):
+        use_vbr.set(True)
     if config.get('starting_chapter'):
         chapter_entry.configure(state='normal')
         chapter_entry.delete(0, tk.END)
         chapter_entry.insert(0, config['starting_chapter'])
         on_detect_titles_changed()
     last_directory = config.get('last_directory', '')
+    last_output_directory = config.get('last_output_directory', '')
 
     def get_current_config():
         return {
@@ -319,8 +411,11 @@ def start_gui():
             'chapter_gap': gap_entry.get(),
             'gpu_acceleration': gpu_acceleration.get(),
             'detect_titles': detect_titles.get(),
+            'bitrate': bitrate_combo.get(),
+            'vbr': use_vbr.get(),
             'starting_chapter': chapter_entry.get(),
             'last_directory': last_directory,
+            'last_output_directory': last_output_directory,
         }
 
     def on_close():
@@ -611,7 +706,8 @@ def start_gui():
                                         encode_futures[wav_fn] = (
                                             encode_executor.submit(
                                                 encode_chapter_to_m4a,
-                                                wav_fn, m4a_fn),
+                                                wav_fn, m4a_fn,
+                                                job.bitrate, job.vbr),
                                             m4a_fn)
                                     else:
                                         print(
@@ -667,7 +763,9 @@ def start_gui():
                                 title, creator, chapter_num,
                                 converted_titles or None,
                                 progress_callback=m4b_prog,
-                                preencoded=True)
+                                preencoded=True,
+                                bitrate=job.bitrate,
+                                vbr=job.vbr)
 
                             job.status = "Done"
                             jobs_completed += 1
@@ -846,13 +944,16 @@ def start_gui():
             widget.destroy()
         checkbox_vars.clear()
 
+        display_idx = 0
         for chapter in chapters:
             word_count = len(chapter.extracted_text.split())
 
             if word_count == 0:
                 continue
 
+            display_idx += 1
             var = tk.BooleanVar()
+            var.trace_add('write', update_summary)
 
             row_frame = tk.Frame(checkbox_frame)
             row_frame.pack(anchor="w")
@@ -873,7 +974,7 @@ def start_gui():
             display_name = getattr(chapter, 'display_title', chapter.file_name)
             title_label = tk.Label(
                 row_frame,
-                text=display_name,
+                text=f"{display_idx}. {display_name}",
             )
             title_label.pack(side="left")
 
@@ -895,6 +996,8 @@ def start_gui():
             play_label.bind("<Button-1>",
                             lambda e, ch=chapter, pl=play_label:
                             handle_chapter_click(ch, pl))
+
+        update_summary()
 
     current_file_path = ''
     batch_queue = []
@@ -939,9 +1042,11 @@ def start_gui():
             detect_titles=detect_titles.get(),
             starting_chapter=starting_ch,
             chapter_titles=titles,
-            title=get_title(book),
-            author=get_author(book),
+            title=title_entry.get().strip() or get_title(book),
+            author=author_entry.get().strip() or get_author(book),
             total_words=total_words,
+            bitrate=bitrate_combo.get(),
+            vbr=use_vbr.get(),
         )
         batch_queue.append(job)
         messagebox.showinfo(
@@ -957,8 +1062,10 @@ def start_gui():
         add_tooltip(file_label, file_path)
         global book
         book, chapters_from_book, book_cover = get_book(file_path, True)
-        book_label.config(text=f"Title: {get_title(book)}")
-        author_label.config(text=f"Author: {get_author(book)}")
+        title_entry.delete(0, tk.END)
+        title_entry.insert(0, get_title(book))
+        author_entry.delete(0, tk.END)
+        author_entry.insert(0, get_author(book))
         if book_cover:
             cover_label.image = book_cover
             cover_label.configure(image=book_cover)
@@ -1041,8 +1148,8 @@ def start_gui():
                     root.after(0, lambda: messagebox.showerror(
                         "Error", "Invalid chapter number."))
                     return
-                title = get_title(book)
-                creator = get_author(book)
+                title = title_override
+                creator = author_override
                 if detect_titles.get():
                     chapter_titles = get_chapter_titles(book, chapters_selected)
                 else:
@@ -1071,6 +1178,8 @@ def start_gui():
 
                 for i, chapter in enumerate(chapters_selected, start=1):
                     if cancel_event.is_set():
+                        for _, (fut, _) in encode_futures.items():
+                            fut.cancel()
                         set_status("Cancelled")
                         return
                     text = chapter.extracted_text
@@ -1086,7 +1195,8 @@ def start_gui():
                         wav_files.append(wav_filename)
                         encode_futures[wav_filename] = (
                             encode_executor.submit(
-                                encode_chapter_to_m4a, wav_filename, m4a_filename),
+                                encode_chapter_to_m4a, wav_filename, m4a_filename,
+                                bitrate_combo.get(), use_vbr.get()),
                             m4a_filename)
                         words_done += word_counts[i - 1]
                         current_step += 1
@@ -1128,13 +1238,16 @@ def start_gui():
                             wav_files.append(wav_filename)
                             encode_futures[wav_filename] = (
                                 encode_executor.submit(
-                                    encode_chapter_to_m4a, wav_filename, m4a_filename),
+                                    encode_chapter_to_m4a, wav_filename, m4a_filename,
+                                    bitrate_combo.get(), use_vbr.get()),
                                 m4a_filename)
                         else:
                             print(f"Chapter {i}: conversion returned no audio",
                                   file=sys.stderr)
                     except Exception as e:
-                        print(f"Chapter {i} failed: {e}", file=sys.stderr)
+                        import traceback
+                        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                        print(f"Chapter {i} failed: {e}\nTraceback:\n{tb_str}", file=sys.stderr)
                         root.after(0, lambda err=e, idx=i: messagebox.showerror(
                             "Conversion Error",
                             f"Chapter {idx} failed:\n{err}"))
@@ -1143,6 +1256,8 @@ def start_gui():
                     set_progress((current_step / steps) * 100)
 
                 if cancel_event.is_set():
+                    for _, (fut, _) in encode_futures.items():
+                        fut.cancel()
                     set_status("Cancelled")
                     return
 
@@ -1175,7 +1290,9 @@ def start_gui():
                 create_m4b(m4a_files, output_path, cover_image_full, title,
                            creator, chapter_num, converted_titles or None,
                            progress_callback=m4b_progress,
-                           preencoded=True)
+                           preencoded=True,
+                           bitrate=bitrate_combo.get(),
+                           vbr=use_vbr.get())
                 set_status("Conversion complete")
                 conversion_success = True
             except Exception as e:
@@ -1220,19 +1337,27 @@ def start_gui():
                                    "Please select an epub file first.")
             return
 
+        nonlocal last_output_directory
         file_path = current_file_path
+        save_initialdir = (last_output_directory
+                           or last_directory
+                           or str(Path(file_path).parent))
         output_path = filedialog.asksaveasfilename(
             title='Save audiobook as',
-            initialdir=last_directory or str(Path(file_path).parent),
+            initialdir=save_initialdir,
             initialfile=Path(file_path).stem + '.m4b',
             filetypes=[('M4B audiobook', '*.m4b')],
             defaultextension='.m4b')
         if not output_path:
             return
+        last_output_directory = str(Path(output_path).parent)
+        save_config(get_current_config())
+
+        title_override = title_entry.get().strip() or get_title(book)
+        author_override = author_entry.get().strip() or get_author(book)
 
         voice = deemojify_voice(voice_combo.get())
         speed = speed_entry.get()
-        save_config(get_current_config())
 
         # Check for existing wav files from a previous run
         resume = False
@@ -1271,6 +1396,25 @@ def start_gui():
         cancel_event.set()
         progress_label.config(text="Cancelling...")
 
+    def clear_cached_wavs():
+        if not current_file_path:
+            messagebox.showwarning("Warning",
+                                   "Please select an epub file first.")
+            return
+        stem = Path(current_file_path).stem
+        wav_dir = Path(current_file_path).parent
+        wavs = sorted(wav_dir.glob(f'{stem}_chapter_*.wav'))
+        if not wavs:
+            messagebox.showinfo("Clear WAVs", "No cached WAV files found.")
+            return
+        if messagebox.askyesno("Clear WAVs",
+                               f"Delete {len(wavs)} cached WAV file(s) for "
+                               f"'{stem}'?"):
+            for wav in wavs:
+                wav.unlink(missing_ok=True)
+            messagebox.showinfo("Clear WAVs",
+                                f"Deleted {len(wavs)} file(s).")
+
     file_frame = tk.Frame(book_frame)
     file_frame.grid(row=0, column=1, pady=5, padx=10)
 
@@ -1279,16 +1423,22 @@ def start_gui():
         text='Select epub file',
         command=select_file,
     )
-    file_button.grid(row=0, column=0, pady=5)
+    file_button.grid(row=0, column=0, columnspan=2, pady=5)
 
     file_label = tk.Label(file_frame, text="")
-    file_label.grid(row=1, column=0, pady=5)
+    file_label.grid(row=1, column=0, columnspan=2, pady=5)
 
-    book_label = tk.Label(file_frame, text="Title: ")
-    book_label.grid(row=2, column=0, pady=5)
+    tk.Label(file_frame, text="Title:").grid(
+        row=2, column=0, sticky='e', padx=(0, 6), pady=4)
+    title_entry = ttk.Entry(file_frame, width=35)
+    title_entry.grid(row=2, column=1, sticky='ew', pady=4)
 
-    author_label = tk.Label(file_frame, text="Author: ")
-    author_label.grid(row=3, column=0, pady=5)
+    tk.Label(file_frame, text="Author:").grid(
+        row=3, column=0, sticky='e', padx=(0, 6), pady=4)
+    author_entry = ttk.Entry(file_frame, width=35)
+    author_entry.grid(row=3, column=1, sticky='ew', pady=4)
+
+    file_frame.columnconfigure(1, weight=1)
 
     cover_label.image = cover_image  # Keep a reference to prevent GC
     cover_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
@@ -1302,6 +1452,10 @@ def start_gui():
     bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=5)
 
     ttk.Separator(root, orient='horizontal').pack(fill='x', padx=5, side=tk.BOTTOM)
+
+    summary_label = tk.Label(bottom_frame, text='', font=('Arial', 11),
+                             fg='#555555', anchor='w')
+    summary_label.pack(fill=tk.X, padx=5, pady=(2, 0))
 
     # Button row: Select All, Clear All, Starting Chapter, Convert/Cancel
     button_row = tk.Frame(bottom_frame)
@@ -1320,6 +1474,13 @@ def start_gui():
         command=clear_all,
     )
     clear_all_button.pack(side=tk.LEFT, padx=5)
+
+    clear_wavs_button = ttk.Button(
+        button_row,
+        text='Clear WAVs',
+        command=clear_cached_wavs,
+    )
+    clear_wavs_button.pack(side=tk.LEFT, padx=5)
 
     cancel_button = ttk.Button(
         button_row,
@@ -1400,6 +1561,37 @@ def start_gui():
     canvas.bind("<Leave>", unbind_scroll)
 
     checkbox_vars = {}
+
+    def update_summary(*_):
+        if not checkbox_vars:
+            summary_label.config(text='')
+            return
+        selected = [(ch, var) for ch, var in checkbox_vars.items() if var.get()]
+        n = len(selected)
+        if n == 0:
+            summary_label.config(text='0 chapters selected')
+            return
+        words = sum(len(ch.extracted_text.split()) for ch, var in selected)
+        try:
+            spd = float(speed_entry.get())
+            if spd <= 0:
+                spd = 1.0
+        except ValueError:
+            spd = 1.0
+        secs = words / (150 * spd)
+        if secs < 60:
+            dur = '~<1 min'
+        elif secs < 3600:
+            dur = f'~{int(secs / 60)} min'
+        else:
+            h = int(secs / 3600)
+            m = int((secs % 3600) / 60)
+            dur = f'~{h} hr {m} min'
+        summary_label.config(
+            text=f'{n} chapters selected · {words:,} words · {dur}')
+
+    speed_entry.bind('<KeyRelease>',
+                     lambda e: (check_speed_range(e), update_summary()), add=True)
 
     # Register drag-and-drop if available
     if HAS_DND:
