@@ -1,4 +1,5 @@
 import io
+import os
 import warnings
 import ebooklib
 from ebooklib import epub
@@ -7,6 +8,8 @@ from PIL import Image, ImageTk
 
 # Suppress ebooklib's internal XML query warning
 warnings.filterwarnings('ignore', category=FutureWarning, module='ebooklib.epub')
+
+_chapter_cache = {}
 
 
 # Elements to remove entirely (including their children)
@@ -90,6 +93,36 @@ def get_book(file_path, resized):
     chapters = find_document_chapters_and_extract_texts(book)
     cover_image = get_cover_image(book, resized=resized)
     return (book, chapters, cover_image)
+
+
+def get_book_cached(file_path, resized):
+    """Return (book, chapters, cover_image), cached per (path, mtime, resized).
+
+    Re-parses when the file is modified on disk. Cover images are PhotoImage
+    objects when resized=True; callers must keep a reference to prevent GC.
+    """
+    try:
+        mod_time = os.path.getmtime(file_path)
+    except OSError:
+        mod_time = 0
+    cache_key = (str(file_path), mod_time, bool(resized))
+    cached = _chapter_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = get_book(file_path, resized)
+    _chapter_cache[cache_key] = result
+    return result
+
+
+def clear_chapter_cache(file_path=None):
+    """Clear the chapter cache; if file_path is given, only drop its entries."""
+    if file_path is None:
+        _chapter_cache.clear()
+        return
+    path_str = str(file_path)
+    stale = [k for k in _chapter_cache if k[0] == path_str]
+    for k in stale:
+        del _chapter_cache[k]
 
 
 def is_valid_chapter(chapter):

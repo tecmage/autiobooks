@@ -1,5 +1,120 @@
 import re
 
+try:
+    import spacy
+    _nlp = None
+
+    def _get_nlp():
+        global _nlp
+        if _nlp is None:
+            _nlp = spacy.load('en_core_web_sm')
+        return _nlp
+
+    HAS_SPACY = True
+except ImportError:
+    HAS_SPACY = False
+
+
+# --- Heteronym disambiguation ---
+
+HETERONYMS = {
+    'read': {
+        'past': 'red',
+        'present': 'reed',
+    },
+    'lead': {
+        'past': 'led',
+        'present': 'leed',
+    },
+    'wind': {
+        'verb': 'wynd',
+        'noun': 'wind',
+    },
+    'wound': {
+        'verb_past': 'wownd',
+        'noun': 'woond',
+    },
+    'tear': {
+        'verb': 'tare',
+        'noun': 'teer',
+    },
+}
+
+
+def resolve_heteronyms(text):
+    """Use spaCy POS tagging to add phoneme hints for ambiguous words."""
+    if not HAS_SPACY:
+        return text
+    nlp = _get_nlp()
+    doc = nlp(text)
+    replacements = []
+    for token in doc:
+        lower = token.text.lower()
+        if lower not in HETERONYMS:
+            continue
+        rules = HETERONYMS[lower]
+        if lower in ('read', 'lead'):
+            if token.tag_ in ('VBD', 'VBN'):
+                hint = rules['past']
+            else:
+                hint = rules['present']
+        elif lower == 'wind':
+            if token.pos_ == 'VERB':
+                hint = rules['verb']
+            else:
+                hint = rules['noun']
+        elif lower == 'wound':
+            if token.pos_ == 'VERB' and token.tag_ in ('VBD', 'VBN'):
+                hint = rules['verb_past']
+            else:
+                hint = rules['noun']
+        elif lower == 'tear':
+            if token.pos_ == 'VERB':
+                hint = rules['verb']
+            else:
+                hint = rules['noun']
+        else:
+            continue
+        if hint != lower:
+            replacements.append((token.idx, token.idx + len(token.text), hint))
+
+    for start, end, hint in reversed(replacements):
+        text = text[:start] + hint + text[end:]
+    return text
+
+
+# --- Contraction resolution ---
+
+def resolve_contractions(text):
+    """Expand ambiguous contractions using spaCy POS context."""
+    if not HAS_SPACY:
+        return text
+    nlp = _get_nlp()
+    doc = nlp(text)
+    replacements = []
+    for i, token in enumerate(doc):
+        if token.text.lower() == "'s":
+            prev = doc[i - 1] if i > 0 else None
+            nxt = doc[i + 1] if i + 1 < len(doc) else None
+            if nxt and nxt.pos_ in ('VERB', 'AUX') and nxt.tag_ == 'VBG':
+                replacements.append(
+                    (token.idx, token.idx + len(token.text), ' is'))
+            elif nxt and nxt.tag_ in ('VBN', 'VBD'):
+                replacements.append(
+                    (token.idx, token.idx + len(token.text), ' has'))
+        elif token.text.lower() == "'d":
+            nxt = doc[i + 1] if i + 1 < len(doc) else None
+            if nxt and nxt.tag_ in ('VBN', 'VBD'):
+                replacements.append(
+                    (token.idx, token.idx + len(token.text), ' had'))
+            elif nxt and nxt.pos_ in ('VERB', 'AUX'):
+                replacements.append(
+                    (token.idx, token.idx + len(token.text), ' would'))
+
+    for start, end, expansion in reversed(replacements):
+        text = text[:start] + expansion + text[end:]
+    return text
+
 
 # --- Unicode normalization ---
 
@@ -182,7 +297,30 @@ def clean_special_characters(text, is_english=True):
 
 # --- Main entry point ---
 
-def normalize_text(text, lang='en-us'):
+def apply_substitutions(text, substitutions):
+    """Apply user-defined word substitutions.
+
+    Each entry is a dict with 'find', 'replace', and optional 'case_sensitive'
+    and 'whole_word' booleans.
+    """
+    if not substitutions:
+        return text
+    for sub in substitutions:
+        find = sub.get('find', '')
+        replace = sub.get('replace', '')
+        if not find:
+            continue
+        if sub.get('whole_word', True):
+            pattern = r'\b' + re.escape(find) + r'\b'
+        else:
+            pattern = re.escape(find)
+        flags = 0 if sub.get('case_sensitive', False) else re.IGNORECASE
+        text = re.sub(pattern, replace, text, flags=flags)
+    return text
+
+
+def normalize_text(text, lang='en-us', substitutions=None,
+                    heteronyms=True, contractions=True):
     """Normalize text before sending to TTS.
 
     English-specific transformations (abbreviation expansion, roman numeral
@@ -196,5 +334,10 @@ def normalize_text(text, lang='en-us'):
     if is_english:
         text = expand_abbreviations(text)
         text = expand_roman_numerals(text)
+        if heteronyms:
+            text = resolve_heteronyms(text)
+        if contractions:
+            text = resolve_contractions(text)
     text = clean_special_characters(text, is_english=is_english)
+    text = apply_substitutions(text, substitutions)
     return text

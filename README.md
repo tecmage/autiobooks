@@ -17,17 +17,21 @@ PRs are welcome!
 
 - **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
 - **Multiple voices** — choose from a range of American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody
-- **Chapter selection** — select which chapters to convert, with word counts and text previews
-- **Drag and drop** — drag an epub file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
+- **Hierarchical chapter tree** — browse chapters in a tree view that follows the epub's table of contents structure, with checkboxes, parent-child propagation, auto-select, duplicate detection, and a full-text preview panel
+- **PDF support** — open PDF files directly; requires pypdf (`pip install pypdf`)
+- **Multiple output formats** — M4B (with chapters), MP3, FLAC, Opus, or WAV
+- **Word substitutions** — user-defined find/replace pairs for fixing TTS mispronunciations
+- **Drag and drop** — drag an epub or PDF file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
 - **Chapter title detection** — automatically extracts chapter titles from the epub's table of contents or headings (can be toggled off)
 - **Voice preview** — listen to a sample of any chapter before converting the full book
 - **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them
 - **GPU acceleration** — CUDA support for significantly faster conversion on NVIDIA GPUs
-- **Adjustable settings** — reading speed, chapter gap duration, bitrate (64/128/192k), VBR mode, and starting chapter number
+- **Adjustable settings** — reading speed, chapter gap duration, bitrate (64/128/192k), VBR mode, output format, and starting chapter number
 - **Editable metadata** — correct the title and author before converting
-- **Settings persistence** — voice, speed, gap, bitrate, and other preferences are saved between sessions
+- **Settings persistence** — voice, speed, gap, bitrate, theme, and other preferences are saved between sessions
 - **Cover art** — embeds the epub's cover image into the output `.m4b` file
 - **Append M4B** — concatenate two `.m4b` files with merged chapter markers via the Tools menu
+- **Dark/light theme** — switchable via Settings > Theme
 - **Docker support** — run in a container with X11 forwarding
 
 ## Requirements
@@ -39,6 +43,27 @@ PRs are welcome!
 - **NVIDIA GPU** (optional) — enables CUDA acceleration for faster conversion. Works with any CUDA-capable GPU. Without a GPU, conversion runs on CPU
 
 ## Changelog
+
+#### 1.7.0
+
+**Chapter tree view** (inspired by [abogen](https://github.com/denizsafak/abogen)):
+- **Hierarchical chapter selector** — flat checkbox list replaced with a `ttk.Treeview` that follows the epub's TOC structure (Part > Chapter > Section)
+- **Image-based checkboxes** — checked, unchecked, and half-checked states drawn with PIL (ttk.Treeview has no native checkboxes)
+- **Parent-child propagation** — checking a parent section checks all its children; parent state updates automatically when children change
+- **Content preview panel** — right-side pane shows the full text of the selected chapter, or book metadata (title, author, publisher, year, description) when no chapter is selected
+- **Auto-select** — non-empty, non-duplicate chapters are automatically selected when a book is loaded
+- **Duplicate detection** — chapters with identical content are marked "(Duplicate)" and excluded from auto-select
+- **Expand/Collapse All** — toolbar buttons for navigating large TOC hierarchies
+- **Content caching** — parsed epub data is cached in memory keyed on (path, mtime, resize); reopening the same file skips re-parsing
+
+**New features:**
+- **PDF input** — open PDF files directly; text extracted page-by-page via pypdf, chapter structure from PDF bookmarks/outline (install with `pip install pypdf`)
+- **Multiple output formats** — choose M4B, MP3, FLAC, Opus, or WAV from the format dropdown; M4B retains chapter markers, other formats concatenate into a single file
+- **Word substitutions** — user-defined find/replace pairs (Tools > Word Substitutions) for fixing recurring TTS mispronunciations of names, places, or terms; supports case-sensitive and whole-word matching; saved between sessions
+- **Heteronym disambiguation** — spaCy POS tagging resolves ambiguous words like "read" (reed/red), "lead", "wind", "tear", "wound" based on grammatical context
+- **Contraction resolution** — spaCy-based expansion of ambiguous contractions ("'s" → is/has, "'d" → would/had) using surrounding context
+- **Prevent system sleep** — OS-level sleep inhibition during conversions (Windows, macOS, Linux) so long books don't fail because the machine went to sleep
+- **Dark/light theme** — switchable via Settings > Theme; preference saved between sessions
 
 #### 1.6.0
 

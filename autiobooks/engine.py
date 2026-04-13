@@ -185,6 +185,86 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 os.unlink(cover_image_path)
 
 
+def encode_chapter(wav_path, output_path, output_format='m4b',
+                    bitrate='64k', vbr=False):
+    """Encode a single WAV chapter to the target format.
+
+    For m4b, produces an M4A intermediate. For other formats, encodes directly.
+    Returns output_path.
+    """
+    if output_format == 'm4b':
+        return encode_chapter_to_m4a(wav_path, output_path, bitrate, vbr)
+
+    format_args = {
+        'mp3': ['-c:a', 'libmp3lame', '-b:a', bitrate],
+        'flac': ['-c:a', 'flac'],
+        'opus': ['-c:a', 'libopus', '-b:a', bitrate],
+        'wav': ['-c:a', 'pcm_s16le'],
+    }
+    codec_args = format_args.get(output_format, ['-c:a', 'copy'])
+    result = subprocess.run([
+        'ffmpeg', '-y',
+        '-i', wav_path,
+        *codec_args,
+        output_path
+    ], capture_output=True)
+    if result.returncode != 0:
+        stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
+        raise RuntimeError(f"Chapter encoding failed:\n{stderr_text}")
+    return output_path
+
+
+def concat_audio_files(chapter_files, output_path, cover_image=None,
+                       title='', creator='', chapter_num=1,
+                       chapter_titles=None, progress_callback=None):
+    """Concatenate encoded chapter files into a single output file (non-m4b)."""
+    with TemporaryDirectory() as tempdir:
+        concat_file = os.path.join(tempdir, 'concat.txt')
+        with open(concat_file, 'w') as f:
+            for chapter_file in chapter_files:
+                safe_path = chapter_file.replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
+
+        total_duration_us = 0
+        for cf in chapter_files:
+            try:
+                total_duration_us += int(probe_duration(cf) * 1_000_000)
+            except Exception:
+                pass
+
+        proc = subprocess.Popen([
+            'ffmpeg', '-y',
+            '-safe', '0',
+            '-f', 'concat',
+            '-i', concat_file,
+            '-c', 'copy',
+            '-progress', 'pipe:1',
+            '-nostats',
+            output_path
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        stderr_buf = []
+        stderr_thread = threading.Thread(
+            target=lambda: stderr_buf.append(proc.stderr.read()))
+        stderr_thread.start()
+
+        for line in proc.stdout:
+            if progress_callback and line.startswith('out_time_ms='):
+                try:
+                    us = int(line.split('=', 1)[1])
+                    if total_duration_us > 0:
+                        pct = min(100, int(us / total_duration_us * 100))
+                        progress_callback(pct)
+                except ValueError:
+                    pass
+
+        proc.wait()
+        stderr_thread.join()
+        if proc.returncode != 0:
+            stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
+            raise RuntimeError(f"FFmpeg concat failed:\n{stderr_text}")
+
+
 def encode_chapter_to_m4a(wav_path, m4a_path, bitrate='64k', vbr=False):
     """Encode a single WAV chapter to AAC/M4A.
 
@@ -256,7 +336,7 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
 
         # Build merged FFMETADATA1
         chapters_file = os.path.join(tempdir, 'chapters.txt')
-        with open(chapters_file, 'w') as f:
+        with open(chapters_file, 'w', encoding='utf-8') as f:
             f.write(f";FFMETADATA1\ntitle={title}\nartist={artist}\nalbum={album}\n\n")
 
             def write_chapters(chapters, offset_ms=0):
@@ -322,7 +402,7 @@ def probe_duration(file_name):
 def create_index_file(title, creator, chapter_durations, chapter_num,
                       chapter_titles=None, output_dir=None):
     chapters_path = Path(output_dir or '.') / 'chapters.txt'
-    with open(chapters_path, "w") as f:
+    with open(chapters_path, "w", encoding="utf-8") as f:
         f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\nalbum={title}\n\n")
         start = 0
         chapter_num = int(chapter_num)
@@ -340,10 +420,13 @@ def create_index_file(title, creator, chapter_durations, chapter_num,
 
 def convert_text_to_wav_file(text, voice, speed, filename,
                              split_pattern=r'\n\n\n', on_segment=None,
-                             trailing_silence=0):
+                             trailing_silence=0, substitutions=None,
+                             heteronyms=True, contractions=True):
     if Path(filename).exists():
         Path(filename).unlink()
-    text = normalize_text(text, lang=get_language_from_voice(voice))
+    text = normalize_text(text, lang=get_language_from_voice(voice),
+                          substitutions=substitutions,
+                          heteronyms=heteronyms, contractions=contractions)
     audio = gen_audio_segments(text, voice, speed, split_pattern, on_segment)
     if audio:
         audio = np.concatenate(audio)
