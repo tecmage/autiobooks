@@ -13,9 +13,11 @@ hidden_imports = [
     'autiobooks.config',
     'autiobooks.engine',
     'autiobooks.epub_parser',
+    'autiobooks.pdf_parser',
     'autiobooks.runtime',
     'autiobooks.text_processing',
     'autiobooks.voices_lang',
+    'pypdf',
     'kokoro',
     'kokoro.pipeline',
     'kokoro.models',
@@ -32,8 +34,8 @@ hidden_imports = [
     'bs4.builder',
     'phonemizer',
     'numpy',
-    'scipy',
-    'scipy.special',
+    'addict',
+    'regex',
     'torch.cuda',
     'spacy',
     'spacy.util',
@@ -50,13 +52,16 @@ datas = []
 excludes = [
     'torch.distributed',
     'torch.testing',
-    'misaki',
 ]
 
 phonemizer_datas, phonemizer_binaries, phonemizer_hiddenimports = collect_all('phonemizer')
 torch_datas, torch_binaries, torch_hiddenimports = collect_all('torch')
 spacy_datas, spacy_binaries, spacy_hiddenimports = collect_all('spacy')
 spacy_model_datas, spacy_model_binaries, spacy_model_hiddenimports = collect_all('en_core_web_sm')
+# misaki must be bundled because kokoro.pipeline does `from misaki import en, espeak`
+# at import time. build.bat overwrites _internal/misaki/en.py with our patched copy
+# (HAS_SPACY patch + silenced TODO:NUM debug) after PyInstaller runs.
+misaki_datas, misaki_binaries, misaki_hiddenimports = collect_all('misaki')
 
 cuda_dlls = ['cublas', 'cudnn', 'cudart', 'cufft', 'curand', 'cusolver', 'nccl', 'nvjit', 'nvtx', 'cupti']
 torch_binaries = [(src, dst) for src, dst in torch_binaries
@@ -64,7 +69,6 @@ torch_binaries = [(src, dst) for src, dst in torch_binaries
 torch_datas = [(src, dst) for src, dst in torch_datas
                if not any(cuda_dll in str(src).lower() for cuda_dll in cuda_dlls)]
 kokoro_datas, kokoro_binaries, kokoro_hiddenimports = collect_all('kokoro')
-misaki_datas, misaki_binaries, misaki_hiddenimports = collect_all('misaki')
 language_tags_datas, language_tags_binaries, language_tags_hiddenimports = collect_all('language_tags')
 csvw_datas, csvw_binaries, csvw_hiddenimports = collect_all('csvw')
 segments_datas, segments_binaries, segments_hiddenimports = collect_all('segments')
@@ -79,9 +83,9 @@ vc_redist = [
 a = Analysis(
     [str(project_root / 'autiobooks' / '__main__.py')],
     pathex=[str(project_root), str(Path(sys.prefix) / 'Lib' / 'site-packages' / 'torch' / 'lib')],
-    binaries=torch_binaries + vc_redist + language_tags_binaries + csvw_binaries + segments_binaries + kokoro_binaries + misaki_binaries + phonemizer_binaries + espeakng_loader_binaries + spacy_binaries + spacy_model_binaries,
-    datas=datas + torch_datas + kokoro_datas + misaki_datas + language_tags_datas + csvw_datas + segments_datas + phonemizer_datas + espeakng_loader_datas + spacy_datas + spacy_model_datas,
-    hiddenimports=hidden_imports + torch_hiddenimports + kokoro_hiddenimports + misaki_hiddenimports + language_tags_hiddenimports + csvw_hiddenimports + segments_hiddenimports + phonemizer_hiddenimports + espeakng_loader_hiddenimports + spacy_hiddenimports + spacy_model_hiddenimports,
+    binaries=torch_binaries + vc_redist + language_tags_binaries + csvw_binaries + segments_binaries + kokoro_binaries + phonemizer_binaries + espeakng_loader_binaries + spacy_binaries + spacy_model_binaries + misaki_binaries,
+    datas=datas + torch_datas + kokoro_datas + language_tags_datas + csvw_datas + segments_datas + phonemizer_datas + espeakng_loader_datas + spacy_datas + spacy_model_datas + misaki_datas,
+    hiddenimports=hidden_imports + torch_hiddenimports + kokoro_hiddenimports + language_tags_hiddenimports + csvw_hiddenimports + segments_hiddenimports + phonemizer_hiddenimports + espeakng_loader_hiddenimports + spacy_hiddenimports + spacy_model_hiddenimports + misaki_hiddenimports,
     hookspath=hookspath,
     hooksconfig={},
     runtime_hooks=[str(project_root / 'autiobooks' / 'hooks' / 'pyi_rth_torch.py')],

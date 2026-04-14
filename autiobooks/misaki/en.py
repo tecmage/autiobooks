@@ -1,7 +1,8 @@
 from . import data
+from .token import MToken
 from dataclasses import dataclass, replace
 from num2words import num2words
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 import importlib.resources
 import json
 import numpy as np
@@ -15,72 +16,39 @@ except ImportError:
     HAS_SPACY = False
     spacy = None
 
-DIPHTHONGS = frozenset('AIOQWYʤʧ')
-
-@dataclass
-class MToken:
-    text: str
-    tag: str
-    whitespace: str
-    is_head: bool = True
-    alias: Optional[str] = None
-    phonemes: Optional[str] = None
-    stress: Union[None, int, float] = None
-    currency: Optional[str] = None
-    num_flags: str = ''
-    prespace: bool = False
-    rating: Optional[int] = None
-    start_ts: Optional[float] = None
-    end_ts: Optional[float] = None
-
-    @staticmethod
-    def merge_tokens(tokens: List['MToken'], unk: Optional[str] = None) -> 'MToken':
-        stress = {t.stress for t in tokens if t.stress is not None}
-        currency = {t.currency for t in tokens if t.currency is not None}
-        rating = {t.rating for t in tokens}
-        if unk is None:
-            phonemes = None
-        else:
-            phonemes = ''
-            for t in tokens:
-                if t.prespace and phonemes and not phonemes[-1].isspace() and t.phonemes:
-                    phonemes += ' '
-                phonemes += unk if t.phonemes is None else t.phonemes
-        return MToken(
-            text=''.join(t.text + t.whitespace for t in tokens[:-1]) + tokens[-1].text,
-            tag=max(tokens, key=lambda t: sum(1 if c == c.lower() else 2 for c in t.text)).tag,
-            whitespace=tokens[-1].whitespace,
-            is_head=tokens[0].is_head,
+def merge_tokens(tokens: List[MToken], unk: Optional[str] = None) -> MToken:
+    stress = {tk._.stress for tk in tokens if tk._.stress is not None}
+    currency = {tk._.currency for tk in tokens if tk._.currency is not None}
+    rating = {tk._.rating for tk in tokens}
+    if unk is None:
+        phonemes = None
+    else:
+        phonemes = ''
+        for tk in tokens:
+            if tk._.prespace and phonemes and not phonemes[-1].isspace() and tk.phonemes:
+                phonemes += ' '
+            phonemes += unk if tk.phonemes is None else tk.phonemes
+    return MToken(
+        text=''.join(tk.text + tk.whitespace for tk in tokens[:-1]) + tokens[-1].text,
+        tag=max(tokens, key=lambda tk: sum(1 if c == c.lower() else 2 for c in tk.text)).tag,
+        whitespace=tokens[-1].whitespace,
+        phonemes=phonemes,
+        start_ts=tokens[0].start_ts,
+        end_ts=tokens[-1].end_ts,
+        _=MToken.Underscore(
+            is_head=tokens[0]._.is_head,
             alias=None,
-            phonemes=phonemes,
             stress=list(stress)[0] if len(stress) == 1 else None,
             currency=max(currency) if currency else None,
-            num_flags=''.join(sorted({c for t in tokens for c in t.num_flags})),
-            prespace=tokens[0].prespace,
+            num_flags=''.join(sorted({c for tk in tokens for c in tk._.num_flags})),
+            prespace=tokens[0]._.prespace,
             rating=None if None in rating else min(rating),
-            start_ts=tokens[0].start_ts,
-            end_ts=tokens[-1].end_ts
         )
+    )
 
-    def is_to(self):
-        return self.text in ('to', 'To') or (self.text == 'TO' and self.tag in ('TO', 'IN'))
-
-    def stress_weight(self):
-        return sum(2 if c in DIPHTHONGS else 1 for c in self.phonemes) if self.phonemes else 0
-
-    def debug_all(self):
-        ps = {None: '❓', '': '🥷'}.get(self.phonemes, self.phonemes)
-        if self.rating is None:
-            rt = '❓(UNK)'
-        elif self.rating >= 5:
-            rt = '💎(5/5)'
-        elif self.rating == 4:
-            rt = '🏆(4/5)'
-        elif self.rating == 3:
-            rt = '🥈(3/5)'
-        else:
-            rt = '🥉(2/5)'
-        return [self.text, self.tag, bool(self.whitespace), ps, rt]
+DIPHTHONGS = frozenset('AIOQWYʤʧ')
+def stress_weight(ps):
+    return sum(2 if c in DIPHTHONGS else 1 for c in ps) if ps else 0
 
 @dataclass
 class TokenContext:
@@ -121,7 +89,7 @@ ORDINALS = frozenset(['st', 'nd', 'rd', 'th'])
 ADD_SYMBOLS = {'.':'dot', '/':'slash'}
 SYMBOLS = {'%':'percent', '&':'and', '+':'plus', '@':'at'}
 
-US_VOCAB = frozenset('AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻ') # ɐ
+US_VOCAB = frozenset('AIOWYbdfhijklmnpstuvwzæðŋɑɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌθᵊᵻʔ') # ɐ
 GB_VOCAB = frozenset('AIQWYabdfhijklmnpstuvwzðŋɑɒɔəɛɜɡɪɹʃʊʌʒʤʧˈˌːθᵊ') # ɐ
 
 STRESSES = 'ˌˈ'
@@ -154,6 +122,9 @@ def apply_stress(ps, stress):
             return ps
         return restress(PRIMARY_STRESS + ps)
     return ps
+
+def is_digit(text):
+    return bool(re.match(r'^[0-9]+$', text))
 
 class Lexicon:
     @staticmethod
@@ -204,8 +175,8 @@ class Lexicon:
             return self.lookup(SYMBOLS[word], None, None, ctx)
         elif '.' in word.strip('.') and word.replace('.', '').isalpha() and len(max(word.split('.'), key=len)) < 3:
             return self.get_NNP(word)
-        elif word == 'a' or (word == 'A' and tag == 'DT'):
-            return 'ɐ', 4
+        elif word in ('a', 'A'):
+            return 'ɐ' if tag == 'DT' else 'ˈA', 4
         elif word in ('am', 'Am', 'AM'):
             if tag.startswith('NN'):
                 return self.get_NNP(word)
@@ -222,6 +193,9 @@ class Lexicon:
             return 'bˈI', 4
         elif word in ('to', 'To') or (word == 'TO' and tag in ('TO', 'IN')):
             return {None: self.golds['to'], False: 'tə', True: 'tʊ'}[ctx.future_vowel], 4
+        elif word in ('in', 'In') or (word == 'IN' and tag != 'NNP'):
+            stress = PRIMARY_STRESS if ctx.future_vowel is None or tag != 'IN' else ''
+            return stress + 'ɪn', 4
         elif word in ('the', 'The') or (word == 'THE' and tag == 'DT'):
             return 'ði' if ctx.future_vowel == True else 'ðə', 4
         elif tag == 'IN' and re.match(r'(?i)vs\.?$', word):
@@ -255,7 +229,7 @@ class Lexicon:
             return True
         elif word == word.upper() and word.lower() in self.golds:
             return True
-        return word[1:] == word[1:].upper()
+        return word[1:] == word[1:].upper()# and len(word) < 8
 
     def lookup(self, word, tag, stress, ctx):
         is_NNP = None
@@ -288,7 +262,9 @@ class Lexicon:
         return stem + 'z'
 
     def stem_s(self, word, tag, stress, ctx):
-        if len(word) > 2 and word.endswith('s') and not word.endswith('ss') and self.is_known(word[:-1], tag):
+        if len(word) < 3 or not word.endswith('s'):
+            return None, None
+        if not word.endswith('ss') and self.is_known(word[:-1], tag):
             stem = word[:-1]
         elif (word.endswith("'s") or (len(word) > 4 and word.endswith('es') and not word.endswith('ies'))) and self.is_known(word[:-2], tag):
             stem = word[:-2]
@@ -316,9 +292,11 @@ class Lexicon:
         return stem + 'ᵻd'
 
     def stem_ed(self, word, tag, stress, ctx):
-        if word.endswith('d') and not word.endswith('dd') and self.is_known(word[:-1], tag):
+        if len(word) < 4 or not word.endswith('d'):
+            return None, None
+        if not word.endswith('dd') and self.is_known(word[:-1], tag):
             stem = word[:-1]
-        elif word.endswith('ed') and not word.endswith('eed') and self.is_known(word[:-2], tag):
+        elif len(word) > 4 and word.endswith('ed') and not word.endswith('eed') and self.is_known(word[:-2], tag):
             stem = word[:-2]
         else:
             return None, None
@@ -341,11 +319,13 @@ class Lexicon:
         return stem + 'ɪŋ'
 
     def stem_ing(self, word, tag, stress, ctx):
-        if word.endswith('ing') and self.is_known(word[:-3], tag):
+        if len(word) < 5 or not word.endswith('ing'):
+            return None, None
+        if len(word) > 5 and self.is_known(word[:-3], tag):
             stem = word[:-3]
-        elif word.endswith('ing') and self.is_known(word[:-3]+'e', tag):
+        elif self.is_known(word[:-3]+'e', tag):
             stem = word[:-3] + 'e'
-        elif re.search(r'([bcdgklmnprstvxz])\1ing$|cking$', word) and self.is_known(word[:-4], tag):
+        elif len(word) > 5 and re.search(r'([bcdgklmnprstvxz])\1ing$|cking$', word) and self.is_known(word[:-4], tag):
             stem = word[:-4]
         else:
             return None, None
@@ -356,7 +336,18 @@ class Lexicon:
         ps, rating = self.get_special_case(word, tag, stress, ctx)
         if ps is not None:
             return ps, rating
-        elif self.is_known(word, tag):
+        wl = word.lower()
+        if len(word) > 1 and word.replace("'", '').isalpha() and word != word.lower() and (
+            tag != 'NNP' or len(word) > 7
+        ) and word not in self.golds and word not in self.silvers and (
+            word == word.upper() or word[1:] == word[1:].lower()
+        ) and (
+            wl in self.golds or wl in self.silvers or any(
+                fn(wl, tag, stress, ctx)[0] for fn in (self.stem_s, self.stem_ed, self.stem_ing)
+            )
+        ):
+            word = wl
+        if self.is_known(word, tag):
             return self.lookup(word, tag, stress, ctx)
         elif word.endswith("s'") and self.is_known(word[:-2] + "'s", tag):
             return self.lookup(word[:-2] + "'s", tag, stress, ctx)
@@ -400,7 +391,11 @@ class Lexicon:
                         result.append(self.lookup(w, None, -2 if w == 'point' else None, None))
                 elif w == 'and' and 'n' in num_flags and result:
                     result[-1] = (result[-1][0] + 'ən', result[-1][1])
-        if not is_head and '.' not in word:
+        if is_digit(word) and suffix in ORDINALS:
+            extend_num(num2words(int(word), to='ordinal'), escape=True)
+        elif not result and len(word) == 4 and currency not in CURRENCIES and is_digit(word):
+            extend_num(num2words(int(word), to='year'), escape=True)
+        elif not is_head and '.' not in word:
             num = word.replace(',', '')
             if num[0] == '0' or len(num) > 3:
                 [extend_num(n, first=False) for n in num]
@@ -436,8 +431,8 @@ class Lexicon:
                 extend_num(num, first=i==0)
                 result.append(self.stem_s(unit+'s', None, None, None) if abs(num) != 1 and unit != 'pence' else self.lookup(unit, None, None, None))
         else:
-            if word.isdigit():
-                word = num2words(int(word), to='ordinal' if suffix in ORDINALS else ('year' if not result and len(word) == 4 else 'cardinal'))
+            if is_digit(word):
+                word = num2words(int(word), to='cardinal')
             elif '.' not in word:
                 word = num2words(int(word.replace(',', '')), to='ordinal' if suffix in ORDINALS else 'cardinal')
             else:
@@ -448,7 +443,10 @@ class Lexicon:
                     word = num2words(float(word))
             extend_num(word, escape=True)
         if not result:
-            print('❌', 'TODO:NUM', word, currency)
+            # Upstream misaki leaves a `print('❌', 'TODO:NUM', ...)` here that
+            # leaks to stderr on any number/currency edge case it can't
+            # phonemize. Silenced in our bundled copy — the None return is
+            # already signalling failure to the caller.
             return None, None
         result, rating = ' '.join(p for p, _ in result), min(r for _, r in result)
         if suffix in ('s', "'s"):
@@ -467,47 +465,57 @@ class Lexicon:
         return f'{ps} {currency}' if currency else ps
 
     @staticmethod
+    def numeric_if_needed(c):
+        if not c.isdigit():
+            return c
+        n = unicodedata.numeric(c)
+        return str(int(n)) if n == int(n) else c
+
+    @staticmethod
     def is_number(word, is_head):
-        if all(not c.isdigit() for c in word):
+        if all(not is_digit(c) for c in word):
             return False
         suffixes = ('ing', "'d", 'ed', "'s", *ORDINALS, 's')
         for s in suffixes:
             if word.endswith(s):
                 word = word[:-len(s)]
                 break
-        return all(c.isdigit() or c in ',.' or (is_head and i == 0 and c == '-') for i, c in enumerate(word))
+        return all(is_digit(c) or c in ',.' or (is_head and i == 0 and c == '-') for i, c in enumerate(word))
 
-    def __call__(self, t, ctx):
-        word = (t.text if t.alias is None else t.alias).replace(chr(8216), "'").replace(chr(8217), "'")
+    def __call__(self, tk, ctx):
+        word = (tk.text if tk._.alias is None else tk._.alias).replace(chr(8216), "'").replace(chr(8217), "'")
         word = unicodedata.normalize('NFKC', word)
+        word = ''.join(Lexicon.numeric_if_needed(c) for c in word)
         stress = None if word == word.lower() else self.cap_stresses[int(word == word.upper())]
-        ps, rating = self.get_word(word, t.tag, stress, ctx)
+        ps, rating = self.get_word(word, tk.tag, stress, ctx)
         if ps is not None:
-            return apply_stress(self.append_currency(ps, t.currency), t.stress), rating
-        elif Lexicon.is_number(word, t.is_head):
-            ps, rating = self.get_number(word, t.currency, t.is_head, t.num_flags)
-            return apply_stress(ps, t.stress), rating
+            return apply_stress(self.append_currency(ps, tk._.currency), tk._.stress), rating
+        elif Lexicon.is_number(word, tk._.is_head):
+            ps, rating = self.get_number(word, tk._.currency, tk._.is_head, tk._.num_flags)
+            return apply_stress(ps, tk._.stress), rating
         elif not all(ord(c) in LEXICON_ORDS for c in word):
             return None, None
-        if word != word.lower() and (word == word.upper() or word[1:] == word[1:].lower()):
-            ps, rating = self.get_word(word.lower(), t.tag, stress, ctx)
-            if ps is not None:
-                return apply_stress(self.append_currency(ps, t.currency), t.stress), rating
+        # if word != word.lower() and (word == word.upper() or word[1:] == word[1:].lower()):
+        #     ps, rating = self.get_word(word.lower(), tk.tag, stress, ctx)
+        #     if ps is not None:
+        #         return apply_stress(self.append_currency(ps, tk._.currency), tk._.stress), rating
         return None, None
 
 class G2P:
-    def __init__(self, trf=False, british=False, fallback=None, unk='❓'):
+    def __init__(self, version=None, trf=False, british=False, fallback=None, unk='❓'):
+        self.version = version
         self.british = british
-        self.unk = unk
         self.lexicon = Lexicon(british)
         self.fallback = fallback if fallback else None
+        self.unk = unk
         if not HAS_SPACY:
             self.nlp = None
             return
         name = f"en_core_web_{'trf' if trf else 'sm'}"
         if not spacy.util.is_package(name):
             spacy.cli.download(name)
-        self.nlp = spacy.load(name)
+        components = ['transformer' if trf else 'tok2vec', 'tagger']
+        self.nlp = spacy.load(name, enable=components)
 
     @staticmethod
     def preprocess(text):
@@ -520,7 +528,7 @@ class G2P:
             result += text[last_end:m.start()]
             tokens.extend(text[last_end:m.start()].split())
             f = m.group(2)
-            if f[1 if f[:1] in ('-', '+') else 0:].isdigit():
+            if is_digit(f[1 if f[:1] in ('-', '+') else 0:]):
                 f = int(f)
             elif f in ('0.5', '+0.5'):
                 f = 0.5
@@ -544,35 +552,41 @@ class G2P:
 
     def tokenize(self, text: str, tokens, features) -> List[MToken]:
         if not HAS_SPACY or self.nlp is None:
-            return [MToken(text=t, tag='NN', whitespace=' ') for t in text.split()]
+            return [MToken(
+                text=t, tag='NN', whitespace=' ',
+                _=MToken.Underscore(is_head=True, num_flags='', prespace=False)
+            ) for t in text.split()]
         doc = self.nlp(text)
         # print(doc._.trf_data.all_outputs[0].data.shape, doc._.trf_data.all_outputs[0].lengths)
-        mutable_tokens = [MToken(text=t.text, tag=t.tag_, whitespace=t.whitespace_) for t in doc]
+        mutable_tokens = [MToken(
+            text=tk.text, tag=tk.tag_, whitespace=tk.whitespace_,
+            _=MToken.Underscore(is_head=True, num_flags='', prespace=False)
+        ) for tk in doc]
         if not features:
             return mutable_tokens
-        align = spacy.training.Alignment.from_strings(tokens, [t.text for t in mutable_tokens])
+        align = spacy.training.Alignment.from_strings(tokens, [tk.text for tk in mutable_tokens])
         for k, v in features.items():
             assert isinstance(v, str) or isinstance(v, int) or v in (0.5, -0.5), (k, v)
             for i, j in enumerate(np.where(align.y2x.data == k)[0]):
                 if j >= len(mutable_tokens):
                     continue
                 if not isinstance(v, str):
-                    mutable_tokens[j].stress = v
+                    mutable_tokens[j]._.stress = v
                 elif v.startswith('/'):
-                    mutable_tokens[j].is_head = i == 0
+                    mutable_tokens[j]._.is_head = i == 0
                     mutable_tokens[j].phonemes = v.lstrip('/') if i == 0 else ''
-                    mutable_tokens[j].rating = 5
+                    mutable_tokens[j]._.rating = 5
                 # elif v.startswith('['):
-                #     mutable_tokens[j].alias = v.lstrip('[') if i == 0 else ''
+                #     mutable_tokens[j]._.alias = v.lstrip('[') if i == 0 else ''
                 elif v.startswith('#'):
-                    mutable_tokens[j].num_flags = v.lstrip('#')
+                    mutable_tokens[j]._.num_flags = v.lstrip('#')
         return mutable_tokens
 
     def fold_left(self, tokens: List[MToken]) -> List[MToken]:
         result = []
-        for t in tokens:
-            t = MToken.merge_tokens([result.pop(), t], unk=self.unk) if result and not t.is_head else t
-            result.append(t)
+        for tk in tokens:
+            tk = merge_tokens([result.pop(), tk], unk=self.unk) if result and not tk._.is_head else tk
+            result.append(tk)
         return result
 
     @staticmethod
@@ -580,65 +594,69 @@ class G2P:
         words = []
         currency = None
         for i, token in enumerate(tokens):
-            if token.alias is None and token.phonemes is None:
-                ts = [replace(token, text=t, whitespace='') for t in subtokenize(token.text)]
+            if token._.alias is None and token.phonemes is None:
+                tks = [replace(
+                    token, text=t, whitespace='',
+                    _=MToken.Underscore(is_head=True, num_flags=token._.num_flags, stress=token._.stress, prespace=False)
+                ) for t in subtokenize(token.text)]
             else:
-                ts = [token]
-            ts[-1].whitespace = token.whitespace
-            for j, t in enumerate(ts):
-                if t.alias is not None or t.phonemes is not None:
+                tks = [token]
+            tks[-1].whitespace = token.whitespace
+            for j, tk in enumerate(tks):
+                if tk._.alias is not None or tk.phonemes is not None:
                     pass
-                elif t.tag == '$' and t.text in CURRENCIES:
-                    currency = t.text
-                    t.phonemes = ''
-                    t.rating = 4
-                elif t.tag == ':' and t.text in ('-', '–'):
-                    t.phonemes = '—'
-                    t.rating = 3
-                elif t.tag in PUNCT_TAGS:
-                    t.phonemes = PUNCT_TAG_PHONEMES.get(t.tag, ''.join(c for c in t.text if c in PUNCTS))
-                    t.rating = 4
-                    # if not t.phonemes:
-                    #     print('❌', 'TODO:PUNCT', t.text)
+                elif tk.tag == '$' and tk.text in CURRENCIES:
+                    currency = tk.text
+                    tk.phonemes = ''
+                    tk._.rating = 4
+                elif tk.tag == ':' and tk.text in ('-', '–'):
+                    tk.phonemes = '—'
+                    tk._.rating = 3
+                elif tk.tag in PUNCT_TAGS and not all(97 <= ord(c.lower()) <= 122 for c in tk.text):
+                    tk.phonemes = PUNCT_TAG_PHONEMES.get(tk.tag, ''.join(c for c in tk.text if c in PUNCTS))
+                    tk._.rating = 4
+                    # if not tk.phonemes:
+                    #     print('❌', 'TODO:PUNCT', tk.text)
                 elif currency is not None:
-                    if t.tag != 'CD':
+                    if tk.tag != 'CD':
                         currency = None
-                    elif j+1 == len(ts) and (i+1 == len(tokens) or tokens[i+1].tag != 'CD'):
-                        t.currency = currency
-                elif 0 < j < len(ts)-1 and t.text == '2' and (ts[j-1].text[-1]+ts[j+1].text[0]).isalpha():
-                    t.alias = 'to'
-                if t.alias is not None or t.phonemes is not None:
-                    words.append(t)
+                    elif j+1 == len(tks) and (i+1 == len(tokens) or tokens[i+1].tag != 'CD'):
+                        tk._.currency = currency
+                elif 0 < j < len(tks)-1 and tk.text == '2' and (tks[j-1].text[-1]+tks[j+1].text[0]).isalpha():
+                    tk._.alias = 'to'
+                if tk._.alias is not None or tk.phonemes is not None:
+                    words.append(tk)
                 elif words and isinstance(words[-1], list) and not words[-1][-1].whitespace:
-                    t.is_head = False
-                    words[-1].append(t)
+                    tk._.is_head = False
+                    words[-1].append(tk)
                 else:
-                    words.append(t if t.whitespace else [t])
+                    words.append(tk if tk.whitespace else [tk])
         return [w[0] if isinstance(w, list) and len(w) == 1 else w for w in words]
 
     @staticmethod
     def token_context(ctx, ps, token):
         vowel = ctx.future_vowel
         vowel = next((None if c in NON_QUOTE_PUNCTS else (c in VOWELS) for c in ps if any(c in s for s in (VOWELS, CONSONANTS, NON_QUOTE_PUNCTS))), vowel) if ps else vowel
-        return TokenContext(future_vowel=vowel, future_to=token.is_to())
+        future_to = token.text in ('to', 'To') or (token.text == 'TO' and token.tag in ('TO', 'IN'))
+        return TokenContext(future_vowel=vowel, future_to=future_to)
 
     @staticmethod
     def resolve_tokens(tokens):
-        text = ''.join(t.text + t.whitespace for t in tokens[:-1]) + tokens[-1].text
-        prespace = ' ' in text or '/' in text or len({0 if c.isalpha() else (1 if c.isdigit() else 2) for c in text if c not in SUBTOKEN_JUNKS}) > 1
-        for i, t in enumerate(tokens):
-            if t.phonemes is None:
-                if i == len(tokens) - 1 and t.text in NON_QUOTE_PUNCTS:
-                    t.phonemes = t.text
-                    t.rating = 3
-                elif all(c in SUBTOKEN_JUNKS for c in t.text):
-                    t.phonemes = ''
-                    t.rating = 3
+        text = ''.join(tk.text + tk.whitespace for tk in tokens[:-1]) + tokens[-1].text
+        prespace = ' ' in text or '/' in text or len({0 if c.isalpha() else (1 if is_digit(c) else 2) for c in text if c not in SUBTOKEN_JUNKS}) > 1
+        for i, tk in enumerate(tokens):
+            if tk.phonemes is None:
+                if i == len(tokens) - 1 and tk.text in NON_QUOTE_PUNCTS:
+                    tk.phonemes = tk.text
+                    tk._.rating = 3
+                elif all(c in SUBTOKEN_JUNKS for c in tk.text):
+                    tk.phonemes = ''
+                    tk._.rating = 3
             elif i > 0:
-                t.prespace = prespace
+                tk._.prespace = prespace
         if prespace:
             return
-        indices = [(PRIMARY_STRESS in t.phonemes, t.stress_weight(), i) for i, t in enumerate(tokens) if t.phonemes]
+        indices = [(PRIMARY_STRESS in tk.phonemes, stress_weight(tk.phonemes), i) for i, tk in enumerate(tokens) if tk.phonemes]
         if len(indices) == 2 and len(tokens[indices[0][2]].text) == 1:
             i = indices[1][2]
             tokens[i].phonemes = apply_stress(tokens[i].phonemes, -0.5)
@@ -649,7 +667,7 @@ class G2P:
         for _, _, i in indices:
             tokens[i].phonemes = apply_stress(tokens[i].phonemes, -0.5)
 
-    def __call__(self, text: str, preprocess=True):
+    def __call__(self, text: str, preprocess=True) -> Tuple[str, List[MToken]]:
         preprocess = G2P.preprocess if preprocess == True else preprocess
         text, tokens, features = preprocess(text) if preprocess else (text, [], {})
         tokens = self.tokenize(text, tokens, features)
@@ -659,49 +677,53 @@ class G2P:
         for i, w in reversed(list(enumerate(tokens))):
             if not isinstance(w, list):
                 if w.phonemes is None:
-                    w.phonemes, w.rating = self.lexicon(replace(w), ctx)
+                    w.phonemes, w.rating = self.lexicon(replace(w, _=w._), ctx)
                 if w.phonemes is None and self.fallback is not None:
-                    w.phonemes, w.rating = self.fallback(replace(w))
+                    w.phonemes, w.rating = self.fallback(replace(w, _=w._))
                 ctx = G2P.token_context(ctx, w.phonemes, w)
                 continue
             left, right = 0, len(w)
             should_fallback = False
             while left < right:
-                if any(t.alias is not None or t.phonemes is not None for t in w[left:right]):
-                    t = None
+                if any(tk._.alias is not None or tk.phonemes is not None for tk in w[left:right]):
+                    tk = None
                 else:
-                    t = MToken.merge_tokens(w[left:right])
-                ps, rating = (None, None) if t is None else self.lexicon(t, ctx)
+                    tk = merge_tokens(w[left:right])
+                ps, rating = (None, None) if tk is None else self.lexicon(tk, ctx)
                 if ps is not None:
                     w[left].phonemes = ps
-                    w[left].rating = rating
+                    w[left]._.rating = rating
                     for x in w[left+1:right]:
                         x.phonemes = ''
                         x.rating = rating
-                    ctx = G2P.token_context(ctx, ps, t)
+                    ctx = G2P.token_context(ctx, ps, tk)
                     right = left
                     left = 0
                 elif left + 1 < right:
                     left += 1
                 else:
                     right -= 1
-                    t = w[right]
-                    if t.phonemes is None:
-                        if all(c in SUBTOKEN_JUNKS for c in t.text):
-                            t.phonemes = ''
-                            t.rating = 3
+                    tk = w[right]
+                    if tk.phonemes is None:
+                        if all(c in SUBTOKEN_JUNKS for c in tk.text):
+                            tk.phonemes = ''
+                            tk._.rating = 3
                         elif self.fallback is not None:
                             should_fallback = True
                             break
                     left = 0
             if should_fallback:
-                t = MToken.merge_tokens(w)
-                w[0].phonemes, w[0].rating = self.fallback(t)
+                tk = merge_tokens(w)
+                w[0].phonemes, w[0]._.rating = self.fallback(tk)
                 for j in range(1, len(w)):
                     w[j].phonemes = ''
-                    w[j].rating = w[0].rating
+                    w[j]._.rating = w[0]._.rating
             else:
                 G2P.resolve_tokens(w)
-        tokens = [MToken.merge_tokens(t, unk=self.unk) if isinstance(t, list) else t for t in tokens]
-        result = ''.join((self.unk if t.phonemes is None else t.phonemes) + t.whitespace for t in tokens)
+        tokens = [merge_tokens(tk, unk=self.unk) if isinstance(tk, list) else tk for tk in tokens]
+        if self.version != '2.0':
+            for tk in tokens:
+                if tk.phonemes:
+                    tk.phonemes = tk.phonemes.replace('ɾ', 'T').replace('ʔ', 't')
+        result = ''.join((self.unk if tk.phonemes is None else tk.phonemes) + tk.whitespace for tk in tokens)
         return result, tokens

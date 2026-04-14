@@ -2,17 +2,18 @@ from setuptools import setup, find_packages
 
 setup(
     name='autiobooks',
-    version='1.7.0',
+    version='2.0.0',
     packages=find_packages(),
     install_requires=[
         'pillow>=10.0.0',
         'tk>=0.1.0',
-        'kokoro>=0.7.9,<0.8.0',
+        'kokoro>=0.9.4,<0.10.0',
         'ebooklib>=0.18,<0.19',
         'soundfile>=0.13.1,<0.14.0',
         'pygame>=2.0.1,<3.0.0',
         'bs4>=0.0.2,<0.0.3',
         'lxml>=4.9.0',
+        'pypdf>=4.0.0',
     ],
     author='David Nesbitt',
     description='Automatically convert epubs to audiobooks',

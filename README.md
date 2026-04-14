@@ -9,16 +9,17 @@ Autiobooks generates `.m4b` audiobooks from regular `.epub` e-books, using Kokor
 
 [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) is an open-weight text-to-speech model with 82 million parameters. It yields natural sounding output while being able to run on consumer hardware.
 
-Kokoro supports multiple languages, but Autiobooks currently exposes only American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md). Additional languages may be enabled in future releases.
+Kokoro supports multiple languages, and Autiobooks exposes all available [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin).
 
 PRs are welcome!
 
 ## Features
 
 - **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
-- **Multiple voices** — choose from a range of American and British English [voices](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) with different accents and prosody
+- **Multiple voices** — 56 voices across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin)
+- **CLI mode** — headless conversion for scripting and automation (`python -m autiobooks convert book.epub`)
 - **Hierarchical chapter tree** — browse chapters in a tree view that follows the epub's table of contents structure, with checkboxes, parent-child propagation, auto-select, duplicate detection, and a full-text preview panel
-- **PDF support** — open PDF files directly; requires pypdf (`pip install pypdf`)
+- **PDF support** — open PDF files directly (pypdf, bundled as a required dependency)
 - **Multiple output formats** — M4B (with chapters), MP3, FLAC, Opus, or WAV
 - **Word substitutions** — user-defined find/replace pairs for fixing TTS mispronunciations
 - **Drag and drop** — drag an epub or PDF file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
@@ -44,6 +45,72 @@ PRs are welcome!
 
 ## Changelog
 
+#### 2.0.0
+
+**New features:**
+- **CLI mode** — headless conversion for scripting and automation: `python -m autiobooks convert book.epub -o book.m4b --voice af_heart`; also `list-chapters` and `list-voices` subcommands; auto-selects non-empty non-duplicate chapters; supports resume, ETA display, and all format/quality options
+- **Multi-language voices** — all 56 Kokoro voices now available across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin); text normalization automatically skips English-specific steps for non-English voices
+
+**Dependency upgrades:**
+- **Kokoro 0.9.4** — upgraded from 0.7.9; scipy dependency removed (smaller install), numpy unpinned, MPS (macOS GPU) support added
+- **Misaki 0.9.4** — upgraded from 0.7.17; improved pronunciation dictionaries, restructured MToken dataclass
+- **phonemizer-fork** — replaces phonemizer as the espeak backend dependency
+
+**Text normalization improvements:**
+- **Diacritics stripping** — accented words (café, naïve, résumé) are normalized to ASCII so they match the TTS lexicon instead of being silently dropped
+- **Fraction expansion** — Unicode fractions (½, ¼, ¾, ⅓, etc.) are expanded to spoken English ("one half", "one quarter")
+- **Expanded abbreviations** — 22 new entries: military ranks (Pvt., Cpl., Maj., Brig.), ecclesiastical (Fr.), geographical (Rd., Ln., Hwy., Mt., Ft.), publishing (Ch., pp., Vol., No., Ed., Fig., Pt.)
+- **Expanded symbol handling** — §, ∞, ≈, ≠, ≤, ≥ expanded to English words; decorative symbols (¶, †, ‡, arrows, stars) removed
+- **Heteronym fix** — removed wind, tear, wound overrides that conflicted with misaki's native POS-aware pronunciation; kept read/lead disambiguation
+
+**Dark mode improvements:**
+- Fixed button text, combobox arrows, dropdown lists, tooltips, radio buttons, label frames, and paned windows not being properly themed in dark mode
+- New dialogs (Preferences, Word Substitutions) now automatically inherit dark theme colors via Tk option database defaults
+- Combobox dropdown lists use dark theme colors
+
+**Bug fixes:**
+- Fixed checkboxes in chapter tree not responding to clicks on some Tk versions (dual `identify_region`/`identify_element` detection)
+- Fixed expand/collapse arrows not working in chapter tree view
+- Widened Preferences and Word Substitutions dialogs to prevent text cutoff
+- Fixed GPU acceleration not resetting to CPU when unchecked — `set_gpu_acceleration(False)` previously left torch's default device stuck on CUDA/MPS from a prior run
+- Fixed duplicate chapter detection being inconsistent between sessions — now uses stable `hashlib.md5` instead of Python's randomized built-in `hash()` (which is re-seeded per interpreter run)
+- Fixed `prevent_sleep()` context manager leaking sleep-inhibit state on exceptions and re-yielding on caller errors; now cleans up correctly regardless of how the `with` block exits
+- Fixed CUDA download leaving corrupt whl files on disk when interrupted — downloads are now atomic (`.part` → rename) with zip validation and a one-shot retry on truncation or corruption
+- Fixed voice preview polling loop spawning overlapping `root.after()` chains when the user clicked play rapidly — a single tracked after ID is now cancelled before each new preview
+- Fixed CLI progress output using `\r` carriage returns when stderr isn't a TTY — piped and redirected logs now get plain newlines
+- Fixed `get_chapter_titles()` returning `None` entries when the TOC had no title and no heading could be extracted — now always returns strings
+- Fixed cover image tempfile leaking if the write failed mid-way — path is now recorded before the write so `finally` cleanup always runs
+- Added `timeout=30` to all `ffprobe` calls (`probe_duration`, `_probe_chapters`, `_probe_format_tags`) so a hung ffprobe can no longer freeze the caller indefinitely
+- Config loader now validates numeric fields (`speed`, `chapter_gap`, `starting_chapter`) before inserting them into entry widgets so a corrupt config does not crash conversion at float/int cast time
+- FFmpeg stderr-drain threads now guard against read failures and record the error in the stderr buffer instead of dropping it silently
+- Append dialog now logs the underlying ffprobe exception to stderr and shows the exception type in the status label instead of a generic "could not read file"
+- Append dialog now validates that the output directory exists and is writable before starting, so long appends don't fail partway through due to permissions
+- Batch queue WAV/M4A cleanup now logs unlink failures to stderr instead of giving up silently on the last retry
+- CLI PDF metadata path now uses the shared `get_title`/`get_author` helpers (PdfBook already implements `get_metadata`), eliminating a duplicate try/except block
+- Fixed CLI crash at the end of every successful conversion — `cmd_convert` referenced a bare `start_time` at module scope instead of `state['start_time']`, raising `NameError` after the final chapter
+- Main conversion thread now wraps `run_conversion` in a top-level try/except/finally so an unexpected exception inside `prevent_sleep()` or the conversion loop can no longer leave the UI stuck with Convert disabled and Cancel enabled — the error surfaces in a dialog and controls always re-enable
+- `save_config` now prints a warning to stderr on `OSError` instead of silently swallowing it, so users can tell when settings aren't being persisted (disk full, read-only home, permissions)
+- Fixed macOS GPU acceleration being effectively broken. Even with "Enable GPU acceleration" ticked, Kokoro ignored `torch.set_default_device('mps')` because its constructor only auto-detects cuda-or-cpu — the model loaded on CPU while intermediate tensors went to MPS, causing a `RuntimeError: Expected all tensors to be on the same device` crash during TTS. `create_pipeline` now passes `device=…` to `KPipeline` explicitly, and the pipeline cache is invalidated whenever the device changes so toggling GPU mid-session actually takes effect
+- Fixed the "Enable GPU acceleration" checkbox staying greyed out on Apple Silicon Macs. The visibility logic only enabled the checkbox when `torch.cuda.is_available()`, so an MPS-capable Mac fell into the "needs CUDA-enabled build" tooltip branch even though `set_gpu_acceleration(True)` would have routed correctly to MPS. Now enables for either CUDA or MPS
+- Config restore in `start_gui()` now calls `set_gpu_acceleration(...)` immediately after syncing the tk var, so the first preview before the first Convert click respects the saved GPU preference instead of running on CPU
+
+**Batch queue improvements:**
+- Batch queue now shares the single conversion loop (`engine.convert_chapters_to_wav`) used by the GUI and CLI, so jobs get per-chapter progress/ETA, chapter-error handling, and the same TTS pipeline as the main window
+- Batch queue now supports resume — cancelling or hitting an error keeps partial WAVs so the next batch run picks up where it left off
+- Batch queue now disables Move Up / Move Down / Remove / Clear All buttons while a run is active so the queue can't be mutated mid-iteration
+- Batch queue now snapshots the main-window GPU preference at the start of the run and restores it in a `finally` block after the last job, instead of leaving `torch`'s default device on whatever the final job was configured with
+- Batch queue now detects output filename collisions between queued jobs (e.g. two EPUBs with the same stem exporting to the same folder) and appends ` (2)`, ` (3)`, … to later writes; comparison is case-insensitive so Windows/macOS don't overwrite on case
+- Batch cleanup now reads the real encoded intermediate paths out of `encode_futures` instead of re-deriving them from the job stem — formerly drifted if `safe_stem` truncation kicked in
+- Batch worker now has a top-level try/except/finally that catches any unexpected crash in the loop, logs a traceback, shows an error dialog, and always re-enables the queue mutation buttons and Start button — a crash mid-queue can no longer leave the window half-disabled
+- Batch Treeview now shows Format and Bitrate columns for each job
+
+**Refactoring:**
+- Extracted the chapter conversion loop (~80 lines) shared between the CLI and GUI conversion paths into `engine.convert_chapters_to_wav()`; callers pass a prepared text list and callbacks (`on_chapter_start`, `on_segment`, `on_chapter_done`, `on_chapter_error`, `cancel_check`) to drive their own progress UI
+- Split the ~2000-line `start_gui()` god function into focused modules: `theme.py` (themes and `apply_theme`), `dialogs.py` (append/preferences/substitutions dialogs), `batch_window.py` (batch queue window and conversion loop); metadata helpers (`get_publisher`, `get_publication_year`, `get_description`) moved to `epub_parser.py`. `autiobooks.py` dropped from 2038 to 1289 lines; extracted modules take state via explicit parameters instead of closing over `start_gui`'s scope.
+
+**CLI improvements:**
+- Added `--no-resume` flag to force re-conversion of all chapters even when cached WAV files exist
+
 #### 1.7.0
 
 **Chapter tree view** (inspired by [abogen](https://github.com/denizsafak/abogen)):
@@ -57,10 +124,10 @@ PRs are welcome!
 - **Content caching** — parsed epub data is cached in memory keyed on (path, mtime, resize); reopening the same file skips re-parsing
 
 **New features:**
-- **PDF input** — open PDF files directly; text extracted page-by-page via pypdf, chapter structure from PDF bookmarks/outline (install with `pip install pypdf`)
+- **PDF input** — open PDF files directly; text extracted page-by-page via pypdf (BSD-3-Clause, now a required dependency), chapter structure from PDF bookmarks/outline
 - **Multiple output formats** — choose M4B, MP3, FLAC, Opus, or WAV from the format dropdown; M4B retains chapter markers, other formats concatenate into a single file
 - **Word substitutions** — user-defined find/replace pairs (Tools > Word Substitutions) for fixing recurring TTS mispronunciations of names, places, or terms; supports case-sensitive and whole-word matching; saved between sessions
-- **Heteronym disambiguation** — spaCy POS tagging resolves ambiguous words like "read" (reed/red), "lead", "wind", "tear", "wound" based on grammatical context
+- **Heteronym disambiguation** — spaCy POS tagging resolves ambiguous words like "read" (reed/red) and "lead" based on grammatical context
 - **Contraction resolution** — spaCy-based expansion of ambiguous contractions ("'s" → is/has, "'d" → would/had) using surrounding context
 - **Prevent system sleep** — OS-level sleep inhibition during conversions (Windows, macOS, Linux) so long books don't fail because the machine went to sleep
 - **Dark/light theme** — switchable via Settings > Theme; preference saved between sessions
@@ -244,8 +311,17 @@ sudo apt install ffmpeg python3-tk espeak-ng
 
 **macOS:**
 ```bash
-brew install ffmpeg python-tk espeak-ng
+brew install ffmpeg espeak-ng
+brew install python-tk@3.12   # match your Python version: @3.10, @3.11, or @3.12
 ```
+
+Homebrew's Python does not bundle tkinter — it's a separate formula, and the generic `python-tk` may not match your interpreter. Pin the version explicitly (`python-tk@3.12` for Python 3.12). Verify with:
+
+```bash
+python3.12 -c "import tkinter; print(tkinter.TkVersion)"
+```
+
+If you use pyenv, install `tcl-tk` via brew *before* building Python, otherwise pyenv silently compiles without tkinter support. The python.org installer bundles tkinter and needs no extra step.
 
 **Windows:**
 - Install [ffmpeg](https://ffmpeg.org/download.html) and add it to your PATH
@@ -267,8 +343,27 @@ pip install ".[dnd]"
 
 ### 3. Run
 
+**GUI mode:**
 ```bash
 python -m autiobooks
+```
+
+**CLI mode (headless):**
+```bash
+# Convert with default settings (auto-selects chapters, af_heart voice)
+python -m autiobooks convert book.epub
+
+# Specify voice, speed, and output format
+python -m autiobooks convert book.epub --voice bm_daniel --speed 1.2 --format mp3
+
+# Convert specific chapters only
+python -m autiobooks convert book.epub --chapters 1,3-5,8
+
+# List available chapters
+python -m autiobooks list-chapters book.epub
+
+# List all available voices
+python -m autiobooks list-voices
 ```
 
 The program creates `.wav` files for each chapter, then combines them into a `.m4b` file for playing using an audiobook player.

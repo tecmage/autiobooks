@@ -3,12 +3,7 @@
 import io
 import re
 from PIL import Image, ImageTk
-
-try:
-    from pypdf import PdfReader
-    HAS_PDF = True
-except ImportError:
-    HAS_PDF = False
+from pypdf import PdfReader
 
 
 class PdfChapter:
@@ -52,11 +47,6 @@ def get_pdf_book(file_path, resized=True):
     Uses the PDF's outline (bookmarks) for chapter structure. Falls back
     to page groups if no outline is present.
     """
-    if not HAS_PDF:
-        raise ImportError(
-            "pypdf is required for PDF support.\n"
-            "Install with: pip install pypdf")
-
     reader = PdfReader(file_path)
 
     meta = reader.metadata or {}

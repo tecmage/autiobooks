@@ -1,3 +1,6 @@
+import sys
+
+
 voices_internal = [
     'af_alloy',
     'af_aoede',
@@ -79,8 +82,10 @@ _PREFIX_TO_LANGUAGE = {
 def get_language_from_voice(voice):
     try:
         return _PREFIX_TO_LANGUAGE[voice[0]]
-    except KeyError:
-        raise ValueError(f"Voice not recognized: {voice}")
+    except (KeyError, IndexError):
+        print(f"Warning: unknown voice prefix {voice!r}, defaulting to en-us",
+              file=sys.stderr)
+        return 'en-us'
 
 
 def emojify_voice(voice):
@@ -96,6 +101,5 @@ def deemojify_voice(voice):
     return voice
 
 
-# filter out non-english voices (they're not working yet)
-voices = [x for x in voices_internal if x.startswith("a") or x.startswith("b")]
+voices = list(voices_internal)
 voices_emojified = [emojify_voice(x) for x in voices]

@@ -22,12 +22,17 @@ WORKDIR /app
 # Install heavy Python deps first for layer caching
 RUN pip install --no-cache-dir \
     "pillow>=10.0.0" \
-    "kokoro>=0.7.9,<0.8.0" \
+    "kokoro>=0.9.4,<0.10.0" \
     "ebooklib>=0.18,<0.19" \
     "soundfile>=0.13.1,<0.14.0" \
     "pygame>=2.0.1,<3.0.0" \
     "bs4>=0.0.2,<0.0.3" \
-    "lxml>=4.9.0"
+    "lxml>=4.9.0" \
+    "pypdf>=4.0.0"
+
+# spaCy model for heteronym/contraction resolution (kokoro pulls in spaCy
+# transitively; the model is a separate download)
+RUN python -m spacy download en_core_web_sm
 
 # Copy project and install
 COPY pyproject.toml setup.py README.md LICENSE ./

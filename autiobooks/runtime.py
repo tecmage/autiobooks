@@ -8,6 +8,13 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
+# Mirror of engine._SUBPROCESS_FLAGS — duplicated here to avoid a circular
+# import (engine imports runtime internals at function scope).
+if sys.platform == 'win32':
+    _SUBPROCESS_FLAGS = {'creationflags': subprocess.CREATE_NO_WINDOW}
+else:
+    _SUBPROCESS_FLAGS = {}
+
 CONFIG_DIR = Path.home() / '.autiobooks'
 BIN_DIR = CONFIG_DIR / 'bin'
 CUDA_DIR = CONFIG_DIR / 'cuda'
@@ -295,7 +302,8 @@ def ensure_espeakng():
 def check_nvidia_gpu():
     """Check if NVIDIA GPU is present using nvidia-smi (no CUDA required)."""
     try:
-        result = subprocess.run(['nvidia-smi'], capture_output=True, timeout=5)
+        result = subprocess.run(['nvidia-smi'], capture_output=True, timeout=5,
+                                **_SUBPROCESS_FLAGS)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
@@ -345,8 +353,8 @@ def _ask_user_download_cuda(root, allow_dont_ask=True):
         root.attributes('-topmost', True)
     
     import tkinter as tk
-    from tkinter import messagebox
-    
+    from tkinter import ttk, messagebox
+
     dialog = tk.Toplevel(root)
     dialog.title("Download GPU Support")
     dialog.geometry("500x220")
@@ -378,29 +386,37 @@ def _ask_user_download_cuda(root, allow_dont_ask=True):
         result_holder[0] = False
         dialog.destroy()
     
-    btn_frame = tk.Frame(dialog)
+    btn_frame = ttk.Frame(dialog)
     btn_frame.pack(pady=15)
-    tk.Button(btn_frame, text="Yes", command=on_yes, width=10).pack(side=tk.LEFT, padx=5)
-    tk.Button(btn_frame, text="No", command=on_no, width=10).pack(side=tk.LEFT, padx=5)
+    ttk.Button(btn_frame, text="Yes", command=on_yes, width=10).pack(side=tk.LEFT, padx=5)
+    ttk.Button(btn_frame, text="No", command=on_no, width=10).pack(side=tk.LEFT, padx=5)
     
     dialog.wait_window()
     return result_holder[0] if result_holder[0] is not None else False
 
 
 def _download_cuda_runtime(cuda_dir, progress_callback=None):
-    """Download CUDA runtime DLLs from torch wheel."""
+    """Download CUDA runtime DLLs from torch wheel.
+
+    Downloads atomically: writes to a .part file and renames on success, so an
+    interrupted download never leaves a corrupt whl file mistaken for a
+    complete one. The downloaded zip is validated before extraction; if
+    validation fails (network corruption, truncation), the download is retried
+    once before giving up.
+    """
     import tempfile
-    import hashlib
-    
+    import zipfile
+
     torch_cuda_url = "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp312-cp312-win_amd64.whl"
-    
+
     cuda_bin = cuda_dir / 'bin'
     cuda_bin.mkdir(parents=True, exist_ok=True)
-    
+
     tmp_dir = Path(tempfile.gettempdir()) / 'autiobooks_cuda'
     tmp_dir.mkdir(exist_ok=True)
     whl_path = tmp_dir / 'torch_cuda.whl'
-    
+    part_path = tmp_dir / 'torch_cuda.whl.part'
+
     def download_with_progress(url, dest):
         req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urlopen(req, timeout=300) as response:
@@ -416,31 +432,61 @@ def _download_cuda_runtime(cuda_dir, progress_callback=None):
                     f.write(buffer)
                     if progress_callback and total_size:
                         progress_callback(downloaded, total_size)
-    
+            if total_size and downloaded < total_size:
+                raise IOError(
+                    f"Download truncated: got {downloaded} of {total_size} bytes")
+
+    def fetch_and_validate():
+        if part_path.exists():
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+        download_with_progress(torch_cuda_url, part_path)
+        try:
+            with zipfile.ZipFile(part_path, 'r') as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise zipfile.BadZipFile(f"Corrupt entry: {bad}")
+        except zipfile.BadZipFile:
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+            raise
+        if whl_path.exists():
+            try:
+                whl_path.unlink()
+            except OSError:
+                pass
+        part_path.rename(whl_path)
+
     if progress_callback:
         progress_callback(0, 1)
-    
-    download_with_progress(torch_cuda_url, whl_path)
-    
-    import zipfile
+
+    try:
+        fetch_and_validate()
+    except (IOError, zipfile.BadZipFile, URLError):
+        fetch_and_validate()
+
     with zipfile.ZipFile(whl_path, 'r') as zf:
         for name in zf.namelist():
             if name.startswith('torch/lib/') and name.endswith('.dll'):
                 filename = Path(name).name
                 if any(cuda_dll in name for cuda_dll in [
-                    'cublas', 'cudnn', 'cudart', 'cufft', 'curand', 
+                    'cublas', 'cudnn', 'cudart', 'cufft', 'curand',
                     'cusolver', 'nccl', 'nvjit'
                 ]):
                     out_path = cuda_bin / filename
                     if not out_path.exists():
                         with zf.open(name) as src, open(out_path, 'wb') as dst:
                             dst.write(src.read())
-    
+
     try:
         whl_path.unlink()
     except OSError:
         pass
-    
+
     if progress_callback:
         progress_callback(1, 1)
 
@@ -486,7 +532,8 @@ def _show_cuda_download_dialog(root, progress_callback=None):
         result_holder['cancelled'] = True
         result_holder['done'] = True
 
-    cancel_btn = tk.Button(dialog, text="Cancel", command=on_cancel)
+    cancel_btn = ttk.Button(dialog, text="Cancel", command=on_cancel,
+                            style='Cancel.TButton')
     cancel_btn.pack(pady=5)
 
     import threading

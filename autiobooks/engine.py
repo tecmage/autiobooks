@@ -1,6 +1,8 @@
+import hashlib
 import subprocess
 import sys
 import threading
+import time
 import warnings
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -22,17 +24,110 @@ warnings.filterwarnings('ignore', category=FutureWarning, module='torch.nn.utils
 SAMPLE_RATE = 24000
 
 
+# PyInstaller --windowed Windows builds flash a black console window on every
+# subprocess spawn unless CREATE_NO_WINDOW is set. Spread this dict into every
+# subprocess.run/Popen call in this module and in runtime.py.
+if sys.platform == 'win32':
+    _SUBPROCESS_FLAGS = {'creationflags': subprocess.CREATE_NO_WINDOW}
+else:
+    _SUBPROCESS_FLAGS = {}
+
+
+def safe_stem(stem, wav_dir):
+    """Return a stem short enough that `{wav_dir}/{stem}_chapter_999_enc.m4a`
+    fits within Windows MAX_PATH (260). On non-Windows, returns stem unchanged.
+
+    Long book filenames + deep user home dirs can push generated chapter paths
+    past 260 chars, and Windows CreateFile rejects anything longer. Truncating
+    deterministically (same stem → same truncation) keeps resume working.
+    """
+    if sys.platform != 'win32':
+        return stem
+    reserved = len(str(wav_dir)) + len('\\_chapter_999_enc.m4a') + 1
+    max_stem = 240 - reserved
+    if max_stem < 16:
+        max_stem = 16
+    if len(stem) <= max_stem:
+        return stem
+    short_hash = hashlib.md5(stem.encode('utf-8')).hexdigest()[:8]
+    return stem[:max_stem - 9] + '_' + short_hash
+
+
+def _drain_stderr(proc, stderr_buf):
+    """Read proc.stderr to completion into stderr_buf.
+
+    Returned by threading.Thread's target; exceptions are caught and
+    recorded so FFmpeg error reporting never goes silent if the drain
+    itself fails.
+    """
+    try:
+        stderr_buf.append(proc.stderr.read())
+    except Exception as e:
+        stderr_buf.append(f'<stderr drain failed: {e}>')
+
+
+def _escape_ffmeta(value):
+    """Escape a value for the FFMETADATA1 file format.
+
+    Per ffmpeg docs, values must backslash-escape \\, =, ;, #, and newline.
+    Without this, a title containing any of these corrupts the metadata
+    stream and ffmpeg either parses the wrong key or silently drops fields.
+    """
+    if value is None:
+        return ''
+    s = str(value)
+    s = s.replace('\\', '\\\\')
+    s = s.replace('\n', '\\\n')
+    s = s.replace('=', '\\=')
+    s = s.replace(';', '\\;')
+    s = s.replace('#', '\\#')
+    return s
+
+
+def _safe_probe_duration(file_name):
+    """Probe a media file's duration, returning 0.0 on any failure.
+
+    Used by create_m4b where a missing/corrupt chapter shouldn't abort the
+    whole batch — the caller can still assemble the other chapters and the
+    metadata-stream chapter offsets just compress around the failed one.
+    """
+    try:
+        return probe_duration(file_name)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            ValueError, FileNotFoundError) as e:
+        print(f'probe_duration failed for {file_name}: {e}',
+              file=sys.stderr)
+        return 0.0
+
+
+_pipeline_cache = {}
+_pipeline_lock = threading.Lock()
+_current_device = 'cpu'
+
+
 def set_gpu_acceleration(enabled):
+    global _current_device
+    new_device = 'cpu'
     if enabled:
         if torch.cuda.is_available():
             print('CUDA GPU available', file=sys.stderr)
-            torch.set_default_device('cuda')
+            new_device = 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            print('MPS GPU available', file=sys.stderr)
+            new_device = 'mps'
         else:
-            print('CUDA GPU not available. Defaulting to CPU', file=sys.stderr)
+            print('GPU not available. Defaulting to CPU', file=sys.stderr)
+    torch.set_default_device(new_device)
+    with _pipeline_lock:
+        if new_device != _current_device:
+            _pipeline_cache.clear()
+        _current_device = new_device
 
 
 def get_gpu_acceleration_available():
     if torch.cuda.is_available():
+        return True
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return True
     from .runtime import check_nvidia_gpu, _cuda_installed
     if check_nvidia_gpu() and _cuda_installed():
@@ -40,12 +135,23 @@ def get_gpu_acceleration_available():
     return False
 
 
-_pipeline_cache = {}
-_pipeline_lock = threading.Lock()
-
-
 def create_pipeline(lang_code):
-    """Create a KPipeline instance with proper UTF-8 encoding handling"""
+    """Create a KPipeline instance, forcing UTF-8 for its internal file reads.
+
+    KPipeline opens internal config files without specifying encoding, which
+    breaks on Windows where the preferred encoding is cp1252. We briefly
+    monkey-patch builtins.open to inject encoding='utf-8' when not otherwise
+    specified. This patch is serialized via _pipeline_lock and only held
+    during the KPipeline() constructor, so the only threads that can observe
+    it are ones doing file I/O during that brief window — and the wrapper
+    only *adds* utf-8 when encoding is unspecified, which is a safer default
+    anyway. On systems where utf-8 is already the preferred encoding we skip
+    the patch entirely so there is no global side effect at all.
+    """
+    import locale
+    if locale.getpreferredencoding(False).lower().replace('-', '') == 'utf8':
+        return KPipeline(lang_code=lang_code, device=_current_device)
+
     import builtins
     original_open = builtins.open
 
@@ -56,7 +162,7 @@ def create_pipeline(lang_code):
 
     try:
         builtins.open = utf8_open
-        return KPipeline(lang_code=lang_code)
+        return KPipeline(lang_code=lang_code, device=_current_device)
     finally:
         builtins.open = original_open
 
@@ -90,7 +196,7 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
     with TemporaryDirectory() as tempdir:
         # Create concat file listing chapter files
         concat_file = os.path.join(tempdir, 'concat.txt')
-        with open(concat_file, 'w') as f:
+        with open(concat_file, 'w', encoding='utf-8') as f:
             for chapter_file in chapter_files:
                 safe_path = chapter_file.replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
@@ -103,7 +209,7 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
         # the remainder (e.g. chapters recovered via resume).
         if preencoded:
             with ThreadPoolExecutor(max_workers=min(len(chapter_files), 8)) as pool:
-                durations = list(pool.map(probe_duration, chapter_files))
+                durations = list(pool.map(_safe_probe_duration, chapter_files))
         else:
             known = known_durations or {}
             files_to_probe = [f for f in chapter_files if f not in known]
@@ -111,7 +217,8 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 with ThreadPoolExecutor(
                         max_workers=min(len(files_to_probe), 8)) as pool:
                     probed = dict(zip(files_to_probe,
-                                      pool.map(probe_duration, files_to_probe)))
+                                      pool.map(_safe_probe_duration,
+                                               files_to_probe)))
             else:
                 probed = {}
             durations = [
@@ -129,9 +236,14 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
         try:
             if cover_image:
                 cover_image_file = NamedTemporaryFile("wb", delete=False)
-                cover_image_file.write(cover_image)
-                cover_image_file.close()
+                # Record the path before writing so cleanup runs even if the
+                # write or close raises — NamedTemporaryFile has already
+                # created the file on disk at this point.
                 cover_image_path = cover_image_file.name
+                try:
+                    cover_image_file.write(cover_image)
+                finally:
+                    cover_image_file.close()
                 cover_image_args = [
                     "-i", cover_image_path,
                     '-disposition:v', 'attached_pic'
@@ -158,11 +270,12 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 '-progress', 'pipe:1',
                 '-nostats',
                 output_path
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+               **_SUBPROCESS_FLAGS)
 
             stderr_buf = []
             stderr_thread = threading.Thread(
-                target=lambda: stderr_buf.append(proc.stderr.read()))
+                target=_drain_stderr, args=(proc, stderr_buf))
             stderr_thread.start()
 
             for line in proc.stdout:
@@ -182,7 +295,146 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 raise RuntimeError(f"FFmpeg failed:\n{stderr_text}")
         finally:
             if cover_image_path and os.path.exists(cover_image_path):
-                os.unlink(cover_image_path)
+                for attempt in range(3):
+                    try:
+                        os.unlink(cover_image_path)
+                        break
+                    except OSError:
+                        if attempt < 2:
+                            time.sleep(0.5)
+
+
+_INTERMEDIATE_EXTS = {
+    'm4b': '.m4a',  # intermediate for final mux
+    'mp3': '.mp3',
+    'flac': '.flac',
+    'opus': '.opus',
+    'wav': '.wav',
+}
+
+
+def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
+                            encode_executor, *,
+                            out_format='m4b', bitrate='64k', vbr=False,
+                            chapter_gap=0.0, substitutions=None,
+                            heteronyms=True, contractions=True,
+                            resume=True, cancel_check=None,
+                            on_chapter_start=None, on_segment=None,
+                            on_chapter_done=None, on_chapter_error=None):
+    """Run TTS for each chapter text and queue background encoding.
+
+    Shared by the CLI and GUI conversion paths. Generates `{stem}_chapter_{i}.wav`
+    (1-based) in `wav_dir` and submits each to `encode_executor` to be encoded
+    to `{stem}_chapter_{i}_enc{ext}` in the target format.
+
+    Callbacks let the caller drive progress reporting without the helper
+    needing to know anything about Tkinter or stderr:
+      on_chapter_start(idx, total, text, is_resume)
+      on_segment(idx, seg_count, est_segs)
+      on_chapter_done(idx, duration_or_none)
+      on_chapter_error(idx, exception)
+
+    `cancel_check` is polled before each chapter; if it returns truthy the
+    loop stops, already-submitted futures are cancelled, and
+    `cancelled` is True in the returned dict.
+
+    The caller owns `encode_executor` and must shut it down. Chapter files
+    that resumed-from-disk are submitted to the executor immediately so the
+    returned dict always maps every wav to a future.
+
+    Returns a dict with:
+      wav_files      — list[str] in generation order (resumed + newly done)
+      encode_futures — dict[wav_path] -> (Future, encoded_path)
+      cancelled      — bool
+    """
+    wav_dir = Path(wav_dir)
+    total = len(chapter_texts)
+    enc_ext = _INTERMEDIATE_EXTS.get(out_format, '.m4a')
+    wav_files = []
+    encode_futures = {}
+    cancelled = False
+
+    def _cancel_pending():
+        for fut, _ in encode_futures.values():
+            fut.cancel()
+
+    for i, text in enumerate(chapter_texts, start=1):
+        if cancel_check is not None and cancel_check():
+            cancelled = True
+            _cancel_pending()
+            return {'wav_files': wav_files,
+                    'encode_futures': encode_futures,
+                    'cancelled': True}
+
+        wav_filename = str(wav_dir / f'{stem}_chapter_{i}.wav')
+        enc_filename = str(wav_dir / f'{stem}_chapter_{i}_enc{enc_ext}')
+
+        if resume and Path(wav_filename).exists():
+            if on_chapter_start is not None:
+                on_chapter_start(i, total, text, True)
+            wav_files.append(wav_filename)
+            encode_futures[wav_filename] = (
+                encode_executor.submit(
+                    encode_chapter, wav_filename, enc_filename,
+                    out_format, bitrate, vbr),
+                enc_filename)
+            if on_chapter_done is not None:
+                on_chapter_done(i, None)
+            continue
+
+        if on_chapter_start is not None:
+            on_chapter_start(i, total, text, False)
+
+        est_segs = max(len(text.split('\n\n\n')), 1)
+
+        def _seg_cb(seg_count, _idx=i, _est=est_segs):
+            if on_segment is not None:
+                on_segment(_idx, seg_count, _est)
+
+        try:
+            duration = convert_text_to_wav_file(
+                text, voice, speed, wav_filename,
+                on_segment=_seg_cb,
+                trailing_silence=chapter_gap,
+                substitutions=substitutions,
+                heteronyms=heteronyms,
+                contractions=contractions)
+        except Exception as e:
+            if on_chapter_error is not None:
+                on_chapter_error(i, e)
+            else:
+                print(f"Chapter {i} failed: {e}", file=sys.stderr)
+            continue
+
+        if duration is not None:
+            wav_files.append(wav_filename)
+            encode_futures[wav_filename] = (
+                encode_executor.submit(
+                    encode_chapter, wav_filename, enc_filename,
+                    out_format, bitrate, vbr),
+                enc_filename)
+
+        if on_chapter_done is not None:
+            on_chapter_done(i, duration)
+
+    if cancel_check is not None and cancel_check():
+        cancelled = True
+        _cancel_pending()
+
+    return {'wav_files': wav_files,
+            'encode_futures': encode_futures,
+            'cancelled': cancelled}
+
+
+# Map the bitrate spinbox values to libmp3lame VBR quality levels when
+# MP3 + VBR is active. Lower -q:a is better quality. These roughly track
+# the CBR labels as average output bitrate so "64k" stays small and "192k"
+# stays large in both modes.
+_MP3_VBR_QUALITY = {
+    '64k': '7',
+    '128k': '4',
+    '192k': '2',
+}
 
 
 def encode_chapter(wav_path, output_path, output_format='m4b',
@@ -195,19 +447,23 @@ def encode_chapter(wav_path, output_path, output_format='m4b',
     if output_format == 'm4b':
         return encode_chapter_to_m4a(wav_path, output_path, bitrate, vbr)
 
-    format_args = {
-        'mp3': ['-c:a', 'libmp3lame', '-b:a', bitrate],
-        'flac': ['-c:a', 'flac'],
-        'opus': ['-c:a', 'libopus', '-b:a', bitrate],
-        'wav': ['-c:a', 'pcm_s16le'],
-    }
-    codec_args = format_args.get(output_format, ['-c:a', 'copy'])
+    if output_format == 'mp3' and vbr:
+        quality = _MP3_VBR_QUALITY.get(bitrate, '4')
+        codec_args = ['-c:a', 'libmp3lame', '-q:a', quality]
+    else:
+        format_args = {
+            'mp3': ['-c:a', 'libmp3lame', '-b:a', bitrate],
+            'flac': ['-c:a', 'flac'],
+            'opus': ['-c:a', 'libopus', '-b:a', bitrate],
+            'wav': ['-c:a', 'pcm_s16le'],
+        }
+        codec_args = format_args.get(output_format, ['-c:a', 'copy'])
     result = subprocess.run([
         'ffmpeg', '-y',
         '-i', wav_path,
         *codec_args,
         output_path
-    ], capture_output=True)
+    ], capture_output=True, **_SUBPROCESS_FLAGS)
     if result.returncode != 0:
         stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
         raise RuntimeError(f"Chapter encoding failed:\n{stderr_text}")
@@ -220,7 +476,7 @@ def concat_audio_files(chapter_files, output_path, cover_image=None,
     """Concatenate encoded chapter files into a single output file (non-m4b)."""
     with TemporaryDirectory() as tempdir:
         concat_file = os.path.join(tempdir, 'concat.txt')
-        with open(concat_file, 'w') as f:
+        with open(concat_file, 'w', encoding='utf-8') as f:
             for chapter_file in chapter_files:
                 safe_path = chapter_file.replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
@@ -241,11 +497,12 @@ def concat_audio_files(chapter_files, output_path, cover_image=None,
             '-progress', 'pipe:1',
             '-nostats',
             output_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+           **_SUBPROCESS_FLAGS)
 
         stderr_buf = []
         stderr_thread = threading.Thread(
-            target=lambda: stderr_buf.append(proc.stderr.read()))
+            target=_drain_stderr, args=(proc, stderr_buf))
         stderr_thread.start()
 
         for line in proc.stdout:
@@ -278,7 +535,7 @@ def encode_chapter_to_m4a(wav_path, m4a_path, bitrate='64k', vbr=False):
         '-c:a', 'aac',
         *quality_args,
         m4a_path
-    ], capture_output=True)
+    ], capture_output=True, **_SUBPROCESS_FLAGS)
     if result.returncode != 0:
         stderr_text = result.stderr.decode('utf-8', errors='replace')[-2000:]
         raise RuntimeError(f"Chapter encoding failed:\n{stderr_text}")
@@ -292,7 +549,8 @@ def _probe_chapters(file_path):
         '-print_format', 'json',
         '-show_chapters',
         file_path
-    ], capture_output=True, text=True, check=True)
+    ], capture_output=True, text=True, check=True, timeout=30,
+       **_SUBPROCESS_FLAGS)
     return json.loads(result.stdout).get('chapters', [])
 
 
@@ -303,7 +561,8 @@ def _probe_format_tags(file_path):
         '-print_format', 'json',
         '-show_format',
         file_path
-    ], capture_output=True, text=True, check=True)
+    ], capture_output=True, text=True, check=True, timeout=30,
+       **_SUBPROCESS_FLAGS)
     return json.loads(result.stdout).get('format', {}).get('tags', {})
 
 
@@ -316,7 +575,7 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
     with TemporaryDirectory() as tempdir:
         # Concat list
         concat_file = os.path.join(tempdir, 'concat.txt')
-        with open(concat_file, 'w') as f:
+        with open(concat_file, 'w', encoding='utf-8') as f:
             for p in [base_path, append_path]:
                 safe = p.replace("'", "'\\''")
                 f.write(f"file '{safe}'\n")
@@ -337,7 +596,9 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
         # Build merged FFMETADATA1
         chapters_file = os.path.join(tempdir, 'chapters.txt')
         with open(chapters_file, 'w', encoding='utf-8') as f:
-            f.write(f";FFMETADATA1\ntitle={title}\nartist={artist}\nalbum={album}\n\n")
+            f.write(f";FFMETADATA1\ntitle={_escape_ffmeta(title)}"
+                    f"\nartist={_escape_ffmeta(artist)}"
+                    f"\nalbum={_escape_ffmeta(album)}\n\n")
 
             def write_chapters(chapters, offset_ms=0):
                 for ch in chapters:
@@ -346,7 +607,7 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
                     end_ms = int(ch['end'] * tb_num * 1000 / tb_den) + offset_ms
                     ch_title = ch.get('tags', {}).get('title', '')
                     f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start_ms}"
-                            f"\nEND={end_ms}\ntitle={ch_title}\n\n")
+                            f"\nEND={end_ms}\ntitle={_escape_ffmeta(ch_title)}\n\n")
 
             write_chapters(base_chapters)
             write_chapters(append_chapters, offset_ms=base_duration_ms)
@@ -368,11 +629,12 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
             '-progress', 'pipe:1',
             '-nostats',
             output_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+           **_SUBPROCESS_FLAGS)
 
         stderr_buf = []
         stderr_thread = threading.Thread(
-            target=lambda: stderr_buf.append(proc.stderr.read()))
+            target=_drain_stderr, args=(proc, stderr_buf))
         stderr_thread.start()
 
         for line in proc.stdout:
@@ -395,15 +657,19 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
 def probe_duration(file_name):
     args = ['ffprobe', '-i', file_name, '-show_entries', 'format=duration',
             '-v', 'quiet', '-of', 'default=noprint_wrappers=1:nokey=1']
-    proc = subprocess.run(args, capture_output=True, text=True, check=True)
+    proc = subprocess.run(args, capture_output=True, text=True, check=True,
+                          timeout=30, **_SUBPROCESS_FLAGS)
     return float(proc.stdout.strip())
 
 
 def create_index_file(title, creator, chapter_durations, chapter_num,
                       chapter_titles=None, output_dir=None):
     chapters_path = Path(output_dir or '.') / 'chapters.txt'
+    esc_title = _escape_ffmeta(title)
+    esc_creator = _escape_ffmeta(creator)
     with open(chapters_path, "w", encoding="utf-8") as f:
-        f.write(f";FFMETADATA1\ntitle={title}\nartist={creator}\nalbum={title}\n\n")
+        f.write(f";FFMETADATA1\ntitle={esc_title}\nartist={esc_creator}"
+                f"\nalbum={esc_title}\n\n")
         start = 0
         chapter_num = int(chapter_num)
         for idx, duration in enumerate(chapter_durations):
@@ -412,8 +678,9 @@ def create_index_file(title, creator, chapter_durations, chapter_num,
                 ch_title = chapter_titles[idx]
             else:
                 ch_title = f"Chapter {chapter_num + idx}"
+            esc_ch_title = _escape_ffmeta(ch_title)
             f.write(f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={start}\nEND={end}" +
-                    f"\ntitle={ch_title}\n\n")
+                    f"\ntitle={esc_ch_title}\n\n")
             start = end
     return str(chapters_path)
 
@@ -422,8 +689,6 @@ def convert_text_to_wav_file(text, voice, speed, filename,
                              split_pattern=r'\n\n\n', on_segment=None,
                              trailing_silence=0, substitutions=None,
                              heteronyms=True, contractions=True):
-    if Path(filename).exists():
-        Path(filename).unlink()
     text = normalize_text(text, lang=get_language_from_voice(voice),
                           substitutions=substitutions,
                           heteronyms=heteronyms, contractions=contractions)
@@ -433,6 +698,18 @@ def convert_text_to_wav_file(text, voice, speed, filename,
         if trailing_silence > 0:
             silence = np.zeros(int(SAMPLE_RATE * trailing_silence))
             audio = np.concatenate([audio, silence])
-        soundfile.write(filename, audio, SAMPLE_RATE)
+        # Write to a .part file and atomically replace the target so a
+        # mid-write failure can never leave a truncated wav that resume
+        # logic would mistake for a complete chapter.
+        part_path = filename + '.part'
+        try:
+            soundfile.write(part_path, audio, SAMPLE_RATE, format='WAV')
+            os.replace(part_path, filename)
+        except Exception:
+            try:
+                Path(part_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return len(audio) / SAMPLE_RATE
     return None

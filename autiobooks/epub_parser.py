@@ -1,5 +1,7 @@
+import html
 import io
 import os
+import re
 import warnings
 import ebooklib
 from ebooklib import epub
@@ -196,14 +198,16 @@ def _build_toc_map(toc, result=None):
 
 def get_chapter_titles(book, chapters):
     """Return a list of chapter titles matching the given chapters.
-    Uses TOC titles when available, falls back to first heading in HTML."""
+    Uses TOC titles when available, falls back to first heading in HTML.
+    Guarantees every entry is a string (empty if nothing could be extracted).
+    """
     toc_map = _build_toc_map(book.toc)
     titles = []
     for chapter in chapters:
         title = toc_map.get(chapter.file_name)
         if not title:
             title = _extract_heading(chapter)
-        titles.append(title)
+        titles.append(title or '')
     return titles
 
 
@@ -219,6 +223,33 @@ def get_author(book):
         return book.get_metadata('DC', 'creator')[0][0] or ''
     except (IndexError, TypeError):
         return ''
+
+
+def get_publisher(book):
+    try:
+        return book.get_metadata('DC', 'publisher')[0][0] or ''
+    except (IndexError, TypeError):
+        return ''
+
+
+def get_publication_year(book):
+    try:
+        date = book.get_metadata('DC', 'date')[0][0] or ''
+        m = re.search(r'\b(19|20)\d{2}\b', date)
+        return m.group(0) if m else ''
+    except (IndexError, TypeError):
+        return ''
+
+
+def get_description(book):
+    try:
+        raw = book.get_metadata('DC', 'description')[0][0] or ''
+    except (IndexError, TypeError):
+        return ''
+    if not raw:
+        return ''
+    decoded = html.unescape(raw)
+    return extract_text_from_html(decoded)
 
 
 def resized_image(item):

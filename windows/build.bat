@@ -61,10 +61,10 @@ echo Installing runtime dependencies
 echo ========================================
 
 REM Kokoro has complex dependencies with version conflicts
-REM Install kokoro 0.7.9 with --no-deps
-"%VENV_PIP%" install pillow scipy numpy
-"%VENV_PIP%" install "kokoro==0.7.9" --no-deps
-"%VENV_PIP%" install loguru huggingface-hub "misaki>=0.7.9,<0.8.0" transformers num2words phonemizer espeakng-loader
+REM Install kokoro 0.9.4 with --no-deps
+"%VENV_PIP%" install pillow numpy
+"%VENV_PIP%" install "kokoro==0.9.4" --no-deps
+"%VENV_PIP%" install loguru huggingface-hub "misaki>=0.9.4,<0.10.0" transformers num2words phonemizer-fork espeakng-loader addict
 "%VENV_PIP%" install ebooklib soundfile pygame bs4 lxml tkinterdnd2
 
 echo.

@@ -1,8 +1,13 @@
 """Hierarchical chapter selector with ttk.Treeview, checkboxes, and preview."""
 
+import hashlib
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageDraw, ImageTk
+
+
+def _content_hash(text):
+    return hashlib.md5(text.encode('utf-8', errors='replace')).digest()
 
 
 class ChapterTreeView:
@@ -91,7 +96,7 @@ class ChapterTreeView:
         self.preview_info_label.pack(fill=tk.X, padx=4, pady=(4, 0))
 
         self.preview_text = tk.Text(right, wrap=tk.WORD, state=tk.NORMAL,
-                                    font=('Arial', 10))
+                                    font=('Arial', 11))
         preview_vsb = ttk.Scrollbar(right, orient='vertical',
                                     command=self.preview_text.yview)
         self.preview_text.configure(yscrollcommand=preview_vsb.set)
@@ -165,7 +170,7 @@ class ChapterTreeView:
                          or chapter.file_name)
         word_count = len(chapter.extracted_text.split())
         is_empty = not chapter.extracted_text.strip()
-        content_hash = hash(chapter.extracted_text)
+        content_hash = _content_hash(chapter.extracted_text)
         is_duplicate = content_hash in self._content_hashes
         self._content_hashes.add(content_hash)
 
@@ -187,7 +192,7 @@ class ChapterTreeView:
     def _detect_duplicates(self):
         seen = {}
         for iid, ch in self._item_to_chapter.items():
-            h = hash(ch.extracted_text)
+            h = _content_hash(ch.extracted_text)
             if h in seen:
                 title = self.tree.item(iid, 'text')
                 if '(Duplicate)' not in title:

@@ -1,13 +1,26 @@
 import re
+import sys
+import unicodedata
 
 try:
     import spacy
     _nlp = None
+    _nlp_load_failed = False
 
     def _get_nlp():
-        global _nlp
+        global _nlp, _nlp_load_failed
+        if _nlp_load_failed:
+            return None
         if _nlp is None:
-            _nlp = spacy.load('en_core_web_sm')
+            try:
+                _nlp = spacy.load('en_core_web_sm')
+            except (OSError, IOError) as e:
+                print(f'Warning: spaCy model en_core_web_sm not available '
+                      f'({e}); heteronym/contraction resolution disabled. '
+                      f'Install with: python -m spacy download en_core_web_sm',
+                      file=sys.stderr)
+                _nlp_load_failed = True
+                return None
         return _nlp
 
     HAS_SPACY = True
@@ -26,18 +39,6 @@ HETERONYMS = {
         'past': 'led',
         'present': 'leed',
     },
-    'wind': {
-        'verb': 'wynd',
-        'noun': 'wind',
-    },
-    'wound': {
-        'verb_past': 'wownd',
-        'noun': 'woond',
-    },
-    'tear': {
-        'verb': 'tare',
-        'noun': 'teer',
-    },
 }
 
 
@@ -46,6 +47,8 @@ def resolve_heteronyms(text):
     if not HAS_SPACY:
         return text
     nlp = _get_nlp()
+    if nlp is None:
+        return text
     doc = nlp(text)
     replacements = []
     for token in doc:
@@ -53,28 +56,10 @@ def resolve_heteronyms(text):
         if lower not in HETERONYMS:
             continue
         rules = HETERONYMS[lower]
-        if lower in ('read', 'lead'):
-            if token.tag_ in ('VBD', 'VBN'):
-                hint = rules['past']
-            else:
-                hint = rules['present']
-        elif lower == 'wind':
-            if token.pos_ == 'VERB':
-                hint = rules['verb']
-            else:
-                hint = rules['noun']
-        elif lower == 'wound':
-            if token.pos_ == 'VERB' and token.tag_ in ('VBD', 'VBN'):
-                hint = rules['verb_past']
-            else:
-                hint = rules['noun']
-        elif lower == 'tear':
-            if token.pos_ == 'VERB':
-                hint = rules['verb']
-            else:
-                hint = rules['noun']
+        if token.tag_ in ('VBD', 'VBN'):
+            hint = rules['past']
         else:
-            continue
+            hint = rules['present']
         if hint != lower:
             replacements.append((token.idx, token.idx + len(token.text), hint))
 
@@ -90,6 +75,8 @@ def resolve_contractions(text):
     if not HAS_SPACY:
         return text
     nlp = _get_nlp()
+    if nlp is None:
+        return text
     doc = nlp(text)
     replacements = []
     for i, token in enumerate(doc):
@@ -131,18 +118,66 @@ UNICODE_REPLACEMENTS = {
     '\ufeff': '',    # byte order mark (remove)
     '\ufb01': 'fi',  # fi ligature
     '\ufb02': 'fl',  # fl ligature
+    '\ufb00': 'ff',  # ff ligature
+    '\ufb03': 'ffi', # ffi ligature
+    '\ufb04': 'ffl', # ffl ligature
+    '\u2032': "'",   # prime → apostrophe
+    '\u2033': '"',   # double prime → quotation mark
+    '\u201a': ',',   # single low-9 quotation mark (OCR artifact)
+    '\u201e': '"',   # double low-9 quotation mark
     '\u2014': ', ',  # em-dash → comma pause
+    '\u00b9': '1',   # superscript 1
+    '\u00b2': '2',   # superscript 2
+    '\u00b3': '3',   # superscript 3
+    '\u2070': '0',   # superscript 0
+    '\u2074': '4',   # superscript 4
+    '\u2075': '5',   # superscript 5
+    '\u2076': '6',   # superscript 6
+    '\u2077': '7',   # superscript 7
+    '\u2078': '8',   # superscript 8
+    '\u2079': '9',   # superscript 9
 }
+
+
+FRACTION_REPLACEMENTS = {
+    '\u00bc': 'one quarter',
+    '\u00bd': 'one half',
+    '\u00be': 'three quarters',
+    '\u2153': 'one third',
+    '\u2154': 'two thirds',
+    '\u2155': 'one fifth',
+    '\u2156': 'two fifths',
+    '\u2157': 'three fifths',
+    '\u2158': 'four fifths',
+    '\u2159': 'one sixth',
+    '\u215a': 'five sixths',
+    '\u215b': 'one eighth',
+    '\u215c': 'three eighths',
+    '\u215d': 'five eighths',
+    '\u215e': 'seven eighths',
+}
+
+
+def strip_diacritics(text):
+    """Strip accent marks so accented words match the ASCII-only TTS lexicon."""
+    nfd = unicodedata.normalize('NFD', text)
+    return ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
 
 
 def normalize_unicode(text, is_english=True):
     for char, replacement in UNICODE_REPLACEMENTS.items():
         text = text.replace(char, replacement)
+    if is_english:
+        for char, replacement in FRACTION_REPLACEMENTS.items():
+            text = text.replace(char, ' ' + replacement + ' ')
+        # Fraction slash → regular slash
+        text = text.replace('\u2044', '/')
     # En-dash between numbers: "10–20" → "10 to 20" (English only)
     if is_english:
         text = re.sub(r'(\d)\u2013(\d)', r'\1 to \2', text)
     # Remaining en-dashes
     text = text.replace('\u2013', ' - ')
+    text = strip_diacritics(text)
     return text
 
 
@@ -187,6 +222,30 @@ ABBREVIATIONS = {
     'et al.': 'and others',
     'c.': 'circa',
     'ca.': 'circa',
+    # Military
+    'Pvt.': 'Private',
+    'Cpl.': 'Corporal',
+    'Maj.': 'Major',
+    'Brig.': 'Brigadier',
+    'Cmdt.': 'Commandant',
+    # Ecclesiastical
+    'Fr.': 'Father',
+    # Geographical
+    'Rd.': 'Road',
+    'Ln.': 'Lane',
+    'Hwy.': 'Highway',
+    'Mt.': 'Mount',
+    'Ft.': 'Fort',
+    'Ctr.': 'Center',
+    'Pkwy.': 'Parkway',
+    # Publishing
+    'Ch.': 'Chapter',
+    'pp.': 'pages',
+    'Vol.': 'Volume',
+    'No.': 'Number',
+    'Ed.': 'Edition',
+    'Fig.': 'Figure',
+    'Pt.': 'Part',
     # Saint (before a name — capital letter follows)
     'St.': 'Saint',
 }
@@ -259,6 +318,23 @@ SYMBOL_REPLACEMENTS = {
     '\u00d7': ' by ',         # multiplication sign ×
     '\u00f7': ' divided by ', # division sign ÷
     '\u00b1': ' plus or minus ', # ±
+    '\u00a7': ' section ',    # §
+    '\u221e': ' infinity ',   # ∞
+    '\u2248': ' approximately equal to ', # ≈
+    '\u2260': ' not equal to ', # ≠
+    '\u2264': ' less than or equal to ', # ≤
+    '\u2265': ' greater than or equal to ', # ≥
+    '\u00b6': '',             # ¶ pilcrow (decorative, remove)
+    '\u2020': '',             # † dagger (remove)
+    '\u2021': '',             # ‡ double dagger (remove)
+    '\u2190': ' ',            # ← left arrow
+    '\u2192': ' ',            # → right arrow
+    '\u2191': ' ',            # ↑ up arrow
+    '\u2193': ' ',            # ↓ down arrow
+    '\u25b6': ' ',            # ▶ right triangle
+    '\u25c0': ' ',            # ◀ left triangle
+    '\u2605': ' ',            # ★ black star
+    '\u2606': ' ',            # ☆ white star
 }
 
 # URL pattern
