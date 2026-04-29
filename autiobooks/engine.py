@@ -133,6 +133,28 @@ def safe_stem(stem, wav_dir):
     return stem[:max_stem - 9] + '_' + short_hash
 
 
+def unlink_with_retry(path):
+    """Best-effort delete with exponential backoff.
+
+    On Windows ffmpeg/pygame may still hold a handle for a fraction of a
+    second after exit, so a single unlink can race that. Retries with
+    0.1s → 1.6s backoff (≈3.1s total worst case) and only sleeps when a
+    delete actually fails. Returns None on success or the final OSError.
+    """
+    delay = 0.1
+    last_err = None
+    for attempt in range(6):
+        try:
+            Path(path).unlink(missing_ok=True)
+            return None
+        except OSError as err:
+            last_err = err
+            if attempt < 5:
+                time.sleep(delay)
+                delay *= 2
+    return last_err
+
+
 def _drain_stderr(proc, stderr_buf):
     """Read proc.stderr to completion into stderr_buf.
 
@@ -350,7 +372,7 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 '-progress', 'pipe:1',
                 '-nostats',
                 output_path
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
                **_SUBPROCESS_FLAGS)
 
             stderr_buf = []
@@ -582,7 +604,7 @@ def concat_audio_files(chapter_files, output_path, cover_image=None,
             '-progress', 'pipe:1',
             '-nostats',
             output_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
            **_SUBPROCESS_FLAGS)
 
         stderr_buf = []
@@ -634,7 +656,7 @@ def _probe_chapters(file_path):
         '-print_format', 'json',
         '-show_chapters',
         file_path
-    ], capture_output=True, text=True, check=True, timeout=30,
+    ], capture_output=True, text=True, encoding='utf-8', check=True, timeout=30,
        **_SUBPROCESS_FLAGS)
     return json.loads(result.stdout).get('chapters', [])
 
@@ -646,7 +668,7 @@ def _probe_format_tags(file_path):
         '-print_format', 'json',
         '-show_format',
         file_path
-    ], capture_output=True, text=True, check=True, timeout=30,
+    ], capture_output=True, text=True, encoding='utf-8', check=True, timeout=30,
        **_SUBPROCESS_FLAGS)
     return json.loads(result.stdout).get('format', {}).get('tags', {})
 
@@ -714,7 +736,7 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
             '-progress', 'pipe:1',
             '-nostats',
             output_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
            **_SUBPROCESS_FLAGS)
 
         stderr_buf = []

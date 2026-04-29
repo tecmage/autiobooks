@@ -13,7 +13,7 @@ from pathlib import Path
 from .engine import get_gpu_acceleration_available, gen_audio_segments
 from .engine import set_gpu_acceleration, convert_text_to_wav_file
 from .engine import create_m4b, encode_chapter_to_m4a
-from .engine import concat_audio_files
+from .engine import concat_audio_files, unlink_with_retry
 from .engine import convert_chapters_to_wav
 from .engine import safe_stem, chapter_wav_name
 from .runtime import ensure_cuda
@@ -1043,39 +1043,16 @@ def start_gui():
                 # Wait for any background encoding threads before touching files
                 encode_executor.shutdown(wait=True)
                 if conversion_success:
-                    # Brief delay before cleanup — the m4b muxer may still have
-                    # a file handle open on some systems
-                    time.sleep(3)
-                    # Clean up all chapter wav files on success, including any
-                    # that were created but not successfully added to wav_files
                     for wav_file in all_chapter_wav_files:
-                        wav_path = Path(wav_file)
-                        for attempt in range(3):
-                            try:
-                                wav_path.unlink(missing_ok=True)
-                                break
-                            except OSError:
-                                if attempt < 2:
-                                    time.sleep(2)
-                                else:
-                                    print(f"Warning: could not remove {wav_file}",
-                                          file=sys.stderr)
-                # Always remove intermediate M4A files (not kept for resume).
-                # Retry loop mirrors the wav cleanup above — on Windows, ffmpeg
-                # can hold handles briefly after exit and the first unlink
-                # sometimes fails with PermissionError.
+                        err = unlink_with_retry(wav_file)
+                        if err is not None:
+                            print(f"Warning: could not remove {wav_file}: {err}",
+                                  file=sys.stderr)
                 for m4a_file in all_chapter_m4a_files:
-                    m4a_path = Path(m4a_file)
-                    for attempt in range(3):
-                        try:
-                            m4a_path.unlink(missing_ok=True)
-                            break
-                        except OSError:
-                            if attempt < 2:
-                                time.sleep(2)
-                            else:
-                                print(f"Warning: could not remove {m4a_file}",
-                                      file=sys.stderr)
+                    err = unlink_with_retry(m4a_file)
+                    if err is not None:
+                        print(f"Warning: could not remove {m4a_file}: {err}",
+                              file=sys.stderr)
                 # On cancel/failure, keep wav files for resume
                 cancel_event.clear()
                 root.after(0, enable_controls)

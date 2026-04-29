@@ -15,6 +15,7 @@ from .engine import (
     create_m4b,
     safe_stem,
     set_gpu_acceleration,
+    unlink_with_retry,
 )
 from .epub_parser import get_cover_image
 from .voices_lang import deemojify_voice
@@ -350,18 +351,9 @@ def show_batch_window(
 
             def _cleanup_files(paths):
                 for p in paths:
-                    last_err = None
-                    for attempt in range(3):
-                        try:
-                            Path(p).unlink(missing_ok=True)
-                            last_err = None
-                            break
-                        except OSError as err:
-                            last_err = err
-                            if attempt < 2:
-                                time.sleep(2)
-                    if last_err is not None:
-                        print(f'failed to delete {p}: {last_err}',
+                    err = unlink_with_retry(p)
+                    if err is not None:
+                        print(f'failed to delete {p}: {err}',
                               file=sys.stderr)
 
             for job_idx, job in enumerate(batch_queue):
@@ -573,7 +565,6 @@ def show_batch_window(
                     # cancel/failure so resume works on the next run;
                     # always remove encoded intermediates.
                     if conversion_success and all_wav:
-                        time.sleep(2)
                         _cleanup_files(all_wav)
                     if all_enc:
                         _cleanup_files(all_enc)
