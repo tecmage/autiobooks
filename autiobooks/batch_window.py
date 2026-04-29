@@ -5,10 +5,11 @@ import traceback
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .engine import (
     _INTERMEDIATE_EXTS,
+    chapter_wav_name,
     concat_audio_files,
     convert_chapters_to_wav,
     create_m4b,
@@ -30,6 +31,8 @@ def show_batch_window(
     prevent_sleep,
     prefs,
     get_substitutions,
+    get_phoneme_overrides=None,
+    get_auto_acronyms=None,
 ):
     """Open the batch queue window.
 
@@ -38,6 +41,8 @@ def show_batch_window(
     prevent_sleep: context manager that inhibits OS sleep during run.
     prefs: dict with tk BooleanVars — 'heteronyms', 'contractions'.
     get_substitutions: callable returning the current word substitutions list.
+    get_phoneme_overrides: callable returning the current phoneme override list.
+    get_auto_acronyms: callable returning the current auto-acronym bool.
     """
     if not batch_queue:
         messagebox.showinfo(
@@ -107,58 +112,110 @@ def show_batch_window(
             return f'{job.bitrate} VBR'
         return job.bitrate
 
+    last_queue_snapshot = [()]
+    # -1 when no batch is running; otherwise the index in batch_queue of the
+    # job currently being processed. Used to gate move/remove on pending
+    # rows only and to visually mark the running row.
+    current_running_idx = [-1]
+
+    _default_font = tkfont.nametofont('TkDefaultFont')
+    _running_font = tkfont.Font(family=_default_font.cget('family'),
+                                size=_default_font.cget('size'),
+                                weight='bold')
+    tree.tag_configure('running', font=_running_font)
+
     def refresh_treeview():
         tree.delete(*tree.get_children())
+        running = current_running_idx[0]
         for i, job in enumerate(batch_queue):
             sel = len(job.selected_chapter_indices)
             total = len([c for c in job.chapters
                          if len(c.extracted_text.split()) > 0])
             fmt = getattr(job, 'output_format', 'm4b').upper()
-            tree.insert('', 'end', values=(
-                i + 1, job.title, job.voice, fmt,
+            num_label = f"▶ {i + 1}" if i == running else str(i + 1)
+            tags = ('running',) if i == running else ()
+            tree.insert('', 'end', tags=tags, values=(
+                num_label, job.title, job.voice, fmt,
                 _format_bitrate(job),
                 f"{sel}/{total}",
                 f"{job.total_words:,}",
                 job.status))
+        last_queue_snapshot[0] = tuple(id(j) for j in batch_queue)
 
     refresh_treeview()
 
+    # Poll for external mutations (e.g. main window's "Add to Batch" while
+    # this window is open). The queue is shared mutable state with no
+    # notify channel; cheapest reliable signal is the identity tuple.
+    def poll_queue_changes():
+        if not bw.winfo_exists():
+            return
+        if tuple(id(j) for j in batch_queue) != last_queue_snapshot[0]:
+            refresh_treeview()
+        bw.after(500, poll_queue_changes)
+
+    bw.after(500, poll_queue_changes)
+
     btn_frame = tk.Frame(bw)
     btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+    def _is_pending(idx):
+        """True if idx points to a job that hasn't started yet — i.e. past
+        the currently-running job, or there's no run in progress."""
+        return idx > current_running_idx[0]
 
     def move_up():
         sel = tree.selection()
         if not sel:
             return
         idx = tree.index(sel[0])
-        if idx > 0:
-            batch_queue[idx], batch_queue[idx - 1] = (
-                batch_queue[idx - 1], batch_queue[idx])
-            refresh_treeview()
-            tree.selection_set(tree.get_children()[idx - 1])
+        # Need both source and target (idx-1) to be pending. When running,
+        # that means idx must be at least 2 past the running index.
+        if idx <= 0 or not _is_pending(idx) or not _is_pending(idx - 1):
+            return
+        batch_queue[idx], batch_queue[idx - 1] = (
+            batch_queue[idx - 1], batch_queue[idx])
+        refresh_treeview()
+        tree.selection_set(tree.get_children()[idx - 1])
 
     def move_down():
         sel = tree.selection()
         if not sel:
             return
         idx = tree.index(sel[0])
-        if idx < len(batch_queue) - 1:
-            batch_queue[idx], batch_queue[idx + 1] = (
-                batch_queue[idx + 1], batch_queue[idx])
-            refresh_treeview()
-            tree.selection_set(tree.get_children()[idx + 1])
+        if idx >= len(batch_queue) - 1 or not _is_pending(idx):
+            return
+        batch_queue[idx], batch_queue[idx + 1] = (
+            batch_queue[idx + 1], batch_queue[idx])
+        refresh_treeview()
+        tree.selection_set(tree.get_children()[idx + 1])
 
     def remove_selected():
         sel = tree.selection()
         if not sel:
             return
         idx = tree.index(sel[0])
+        if not _is_pending(idx):
+            return
         batch_queue.pop(idx)
         refresh_treeview()
-        if not batch_queue:
+        if not batch_queue and current_running_idx[0] < 0:
             bw.destroy()
 
     def clear_all_jobs():
+        if current_running_idx[0] >= 0:
+            # Mid-run: only pending jobs (past the running one) are removable.
+            pending_count = len(batch_queue) - (current_running_idx[0] + 1)
+            if pending_count <= 0:
+                return
+            if messagebox.askyesno(
+                    "Clear Pending",
+                    f"Remove {pending_count} pending job(s) from the queue?\n"
+                    "The currently-running job will continue.",
+                    parent=bw):
+                del batch_queue[current_running_idx[0] + 1:]
+                refresh_treeview()
+            return
         if messagebox.askyesno("Clear All",
                                "Remove all jobs from the queue?",
                                parent=bw):
@@ -176,7 +233,6 @@ def show_batch_window(
     clear_btn = ttk.Button(btn_frame, text='Clear All',
                            command=clear_all_jobs)
     clear_btn.pack(side=tk.LEFT, padx=3)
-    queue_mutation_btns = (move_up_btn, move_down_btn, remove_btn, clear_btn)
 
     dir_frame = tk.Frame(bw)
     dir_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -222,8 +278,6 @@ def show_batch_window(
 
         start_btn.configure(state='disabled')
         cancel_btn.configure(state='normal')
-        for b in queue_mutation_btns:
-            b.configure(state='disabled')
         batch_cancel.clear()
 
         user_gpu_pref = None
@@ -241,8 +295,6 @@ def show_batch_window(
                 try:
                     start_btn.configure(state='normal')
                     cancel_btn.configure(state='disabled')
-                    for b in queue_mutation_btns:
-                        b.configure(state='normal')
                 except tk.TclError:
                     pass
 
@@ -257,6 +309,7 @@ def show_batch_window(
                                f"Batch run crashed:\n\n{err}",
                                parent=bw))
             finally:
+                current_running_idx[0] = -1
                 if user_gpu_pref is not None:
                     try:
                         set_gpu_acceleration(user_gpu_pref)
@@ -264,6 +317,7 @@ def show_batch_window(
                         print(f"Failed to restore GPU state: {gpu_err}",
                               file=sys.stderr)
                 safe_after(0, _restore_buttons)
+                safe_after(0, refresh_treeview)
 
         def _run_body():
             total_jobs = len(batch_queue)
@@ -316,6 +370,7 @@ def show_batch_window(
                     safe_after(0, refresh_treeview)
                     break
 
+                current_running_idx[0] = job_idx
                 job.status = "Converting"
                 safe_after(0, refresh_treeview)
 
@@ -350,9 +405,6 @@ def show_batch_window(
                     stem = safe_stem(Path(job.file_path).stem, wav_dir)
 
                     n_selected = len(selected_chapters)
-                    all_wav = [
-                        str(wav_dir / f'{stem}_chapter_{i}.wav')
-                        for i in range(1, n_selected + 1)]
                     all_enc = [
                         str(wav_dir / f'{stem}_chapter_{i}_enc{enc_ext}')
                         for i in range(1, n_selected + 1)]
@@ -372,6 +424,9 @@ def show_batch_window(
                         if i == 1 and job.read_title_author:
                             text = f"{title} by {creator}.\n{text}"
                         chapter_texts.append(text)
+
+                    all_wav = [chapter_wav_name(stem, t, wav_dir)
+                               for t in chapter_texts]
 
                     def _eta_str():
                         elapsed = time.time() - eta_state['start_time']
@@ -428,6 +483,10 @@ def show_batch_window(
                         vbr=job.vbr,
                         chapter_gap=chapter_gap,
                         substitutions=get_substitutions(),
+                        phoneme_overrides=(get_phoneme_overrides()
+                                           if get_phoneme_overrides else None),
+                        auto_acronyms=(get_auto_acronyms()
+                                       if get_auto_acronyms else False),
                         heteronyms=prefs['heteronyms'].get(),
                         contractions=prefs['contractions'].get(),
                         resume=True,
@@ -467,9 +526,8 @@ def show_batch_window(
 
                     converted_titles = []
                     for ci, ch in enumerate(selected_chapters):
-                        wn = str(
-                            wav_dir
-                            / f'{stem}_chapter_{ci + 1}.wav')
+                        wn = chapter_wav_name(
+                            stem, chapter_texts[ci], wav_dir)
                         if (wn in wav_files
                                 and chapter_titles is not None):
                             converted_titles.append(
@@ -522,6 +580,7 @@ def show_batch_window(
                     safe_after(0, refresh_treeview)
 
             batch_cancel.clear()
+            current_running_idx[0] = -1
 
             def show_done():
                 if not bw.winfo_exists():

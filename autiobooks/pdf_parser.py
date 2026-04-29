@@ -93,6 +93,10 @@ def _get_outline(reader):
                     page_num = reader.get_destination_page_number(item)
                 except Exception:
                     continue
+                # pypdf returns -1 for unresolvable destinations; without this
+                # guard, range(-1, end) reads reader.pages[-1] (last page).
+                if page_num is None or page_num < 0:
+                    continue
                 entries.append((level, title, page_num))
 
     walk(raw_outline)

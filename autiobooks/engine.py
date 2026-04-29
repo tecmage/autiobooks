@@ -1,4 +1,5 @@
 import hashlib
+import re
 import subprocess
 import sys
 import threading
@@ -16,6 +17,72 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 from .text_processing import normalize_text
 from .voices_lang import get_language_from_voice
 
+
+def _patch_misaki_preprocess():
+    """Replace misaki.en.G2P.preprocess with a version that keeps whitespace
+    runs as their own source tokens.
+
+    Upstream misaki splits inter-markdown text with `str.split()`, which
+    discards every whitespace run. spaCy's tokenizer keeps `\\n` (and other
+    whitespace) as separate tokens, so the source-token list ends up shorter
+    than the mutable-token list and `Alignment.from_strings` drifts further
+    with every paragraph break. In a multi-paragraph chapter, by the time a
+    `[word](/IPA/)` markdown wrapping appears, the feature gets attached to a
+    punctuation or newline mutable_token instead of the actual word — so the
+    rating-5 phoneme override is silently dropped and the word falls back to
+    misaki's gold lookup. Symptom: contextual `bowed → bˈWd` worked on short
+    isolated sentences but lost the override mid-chapter, which surfaced as
+    "boud" on `bowed` and `bˈWd` audio bleeding onto neighbouring punctuation.
+
+    Kokoro's KPipeline imports `misaki` at module-load time and never exposes
+    a hook for a custom preprocess, so we patch the class method in place.
+    Idempotent — re-imports won't double-patch.
+    """
+    from misaki import en  # system install, used by Kokoro
+    if getattr(en.G2P.preprocess, '_autiobooks_ws_patch', False):
+        return
+
+    @staticmethod
+    def preprocess(text):
+        result = ''
+        tokens = []
+        features = {}
+        last_end = 0
+        text = text.lstrip()
+        def _split_keep_ws(s):
+            return [t for t in re.split(r'(\s+)', s) if t]
+        for m in en.LINK_REGEX.finditer(text):
+            result += text[last_end:m.start()]
+            tokens.extend(_split_keep_ws(text[last_end:m.start()]))
+            f = m.group(2)
+            if en.is_digit(f[1 if f[:1] in ('-', '+') else 0:]):
+                f = int(f)
+            elif f in ('0.5', '+0.5'):
+                f = 0.5
+            elif f == '-0.5':
+                f = -0.5
+            elif len(f) > 1 and f[0] == '/' and f[-1] == '/':
+                f = f[0] + f[1:].rstrip('/')
+            elif len(f) > 1 and f[0] == '#' and f[-1] == '#':
+                f = f[0] + f[1:].rstrip('#')
+            else:
+                f = None
+            if f is not None:
+                features[len(tokens)] = f
+            result += m.group(1)
+            tokens.append(m.group(1))
+            last_end = m.end()
+        if last_end < len(text):
+            result += text[last_end:]
+            tokens.extend(_split_keep_ws(text[last_end:]))
+        return result, tokens, features
+
+    preprocess.__func__._autiobooks_ws_patch = True
+    en.G2P.preprocess = preprocess
+
+
+_patch_misaki_preprocess()
+
 # Suppress torch warnings from Kokoro's model internals
 warnings.filterwarnings('ignore', message='.*dropout option adds dropout.*')
 warnings.filterwarnings('ignore', category=FutureWarning, module='torch.nn.utils.weight_norm')
@@ -31,6 +98,19 @@ if sys.platform == 'win32':
     _SUBPROCESS_FLAGS = {'creationflags': subprocess.CREATE_NO_WINDOW}
 else:
     _SUBPROCESS_FLAGS = {}
+
+
+def chapter_wav_name(stem, text, wav_dir):
+    """Return the canonical resume-safe WAV path for a chapter's text.
+
+    The filename embeds an 8-char MD5 prefix of the chapter text so that
+    reshuffling or shrinking the selected chapter set between runs can't
+    cause a sequential-position resume to feed one chapter's audio into
+    another chapter's slot. Two chapters with identical text deliberately
+    share a wav path (the audio is identical, so re-using it is correct).
+    """
+    h = hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:8]
+    return str(Path(wav_dir) / f'{stem}_chapter_{h}.wav')
 
 
 def safe_stem(stem, wav_dir):
@@ -113,12 +193,12 @@ def set_gpu_acceleration(enabled):
             print('CUDA GPU available', file=sys.stderr)
             new_device = 'cuda'
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            print('MPS GPU available', file=sys.stderr)
             new_device = 'mps'
+            print('MPS GPU available', file=sys.stderr)
         else:
             print('GPU not available. Defaulting to CPU', file=sys.stderr)
-    torch.set_default_device(new_device)
     with _pipeline_lock:
+        torch.set_default_device(new_device)
         if new_device != _current_device:
             _pipeline_cache.clear()
         _current_device = new_device
@@ -318,14 +398,17 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
                             out_format='m4b', bitrate='64k', vbr=False,
                             chapter_gap=0.0, substitutions=None,
                             heteronyms=True, contractions=True,
+                            phoneme_overrides=None, auto_acronyms=False,
                             resume=True, cancel_check=None,
                             on_chapter_start=None, on_segment=None,
                             on_chapter_done=None, on_chapter_error=None):
     """Run TTS for each chapter text and queue background encoding.
 
-    Shared by the CLI and GUI conversion paths. Generates `{stem}_chapter_{i}.wav`
-    (1-based) in `wav_dir` and submits each to `encode_executor` to be encoded
-    to `{stem}_chapter_{i}_enc{ext}` in the target format.
+    Shared by the CLI and GUI conversion paths. Generates
+    `{stem}_chapter_{hash8}.wav` in `wav_dir` (content-hashed filename so
+    resume stays correct across selection changes) and submits each to
+    `encode_executor` to be encoded to `{stem}_chapter_{i}_enc{ext}` in the
+    target format.
 
     Callbacks let the caller drive progress reporting without the helper
     needing to know anything about Tkinter or stderr:
@@ -366,7 +449,7 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
                     'encode_futures': encode_futures,
                     'cancelled': True}
 
-        wav_filename = str(wav_dir / f'{stem}_chapter_{i}.wav')
+        wav_filename = chapter_wav_name(stem, text, wav_dir)
         enc_filename = str(wav_dir / f'{stem}_chapter_{i}_enc{enc_ext}')
 
         if resume and Path(wav_filename).exists():
@@ -398,7 +481,9 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
                 trailing_silence=chapter_gap,
                 substitutions=substitutions,
                 heteronyms=heteronyms,
-                contractions=contractions)
+                contractions=contractions,
+                phoneme_overrides=phoneme_overrides,
+                auto_acronyms=auto_acronyms)
         except Exception as e:
             if on_chapter_error is not None:
                 on_chapter_error(i, e)
@@ -688,10 +773,13 @@ def create_index_file(title, creator, chapter_durations, chapter_num,
 def convert_text_to_wav_file(text, voice, speed, filename,
                              split_pattern=r'\n\n\n', on_segment=None,
                              trailing_silence=0, substitutions=None,
-                             heteronyms=True, contractions=True):
+                             heteronyms=True, contractions=True,
+                             phoneme_overrides=None, auto_acronyms=False):
     text = normalize_text(text, lang=get_language_from_voice(voice),
                           substitutions=substitutions,
-                          heteronyms=heteronyms, contractions=contractions)
+                          heteronyms=heteronyms, contractions=contractions,
+                          phoneme_overrides=phoneme_overrides,
+                          auto_acronyms=auto_acronyms)
     audio = gen_audio_segments(text, voice, speed, split_pattern, on_segment)
     if audio:
         audio = np.concatenate(audio)

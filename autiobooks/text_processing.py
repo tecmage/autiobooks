@@ -31,10 +31,6 @@ except ImportError:
 # --- Heteronym disambiguation ---
 
 HETERONYMS = {
-    'read': {
-        'past': 'red',
-        'present': 'reed',
-    },
     'lead': {
         'past': 'led',
         'present': 'leed',
@@ -55,13 +51,313 @@ def resolve_heteronyms(text):
         lower = token.text.lower()
         if lower not in HETERONYMS:
             continue
+        start = token.idx
+        end = start + len(token.text)
+        # Skip tokens already wrapped in `[word](/IPA/)` so a respelling
+        # can't mutate the bracket display text emitted by an earlier pass
+        # (apply_contextual_overrides) or by user phoneme overrides.
+        if _is_inside_markdown(text, start, end):
+            continue
         rules = HETERONYMS[lower]
         if token.tag_ in ('VBD', 'VBN'):
             hint = rules['past']
         else:
             hint = rules['present']
         if hint != lower:
-            replacements.append((token.idx, token.idx + len(token.text), hint))
+            replacements.append((start, end, hint))
+
+    for start, end, hint in reversed(replacements):
+        text = text[:start] + hint + text[end:]
+    return text
+
+
+# --- Contextual heteronym overrides ---
+#
+# For words whose correct pronunciation depends on context that spaCy's POS
+# tagger alone can't distinguish. Each rule inspects the token + its
+# neighbours and returns an IPA string (canonical IPA, not misaki's internal
+# alphabet) or None to leave the token alone. Rules only emit overrides on
+# positive context evidence — ambiguous tokens fall through to misaki's
+# default gold branch.
+#
+# Emitted markdown `[word](/IPA/)` parses via misaki's LINK_REGEX at rating 5,
+# beating the gold (4) / silver (3) / espeak (2) lexicons. Before the IPA
+# leaves this module it must be folded to misaki's internal alphabet — Kokoro's
+# vocab indexes phonemes character-by-character and only carries single-letter
+# tokens for the five English diphthongs (A=eɪ, I=aɪ, O=oʊ, W=aʊ, Y=ɔɪ; Q=əʊ
+# for GB). Sending raw `aʊ` instead of `W` makes the model read `a` (id 43)
+# and `ʊ` (id 135) as two unrelated phonemes, which destabilises duration
+# prediction and bleeds the override onto neighbouring words.
+
+_CANONICAL_TO_MISAKI_DIPHTHONG = (
+    ('eɪ', 'A'), ('aɪ', 'I'), ('oʊ', 'O'),
+    ('aʊ', 'W'), ('ɔɪ', 'Y'), ('əʊ', 'Q'),
+)
+
+
+def _to_misaki_phonemes(ipa):
+    """Fold canonical-IPA diphthongs to the single-letter codes Kokoro's
+    phoneme vocab is trained on. Other characters (consonants, monophthongs,
+    stress marks, schwas) are identical between canonical IPA and misaki's
+    internal alphabet, so they pass through unchanged. Idempotent."""
+    for canonical, misaki in _CANONICAL_TO_MISAKI_DIPHTHONG:
+        ipa = ipa.replace(canonical, misaki)
+    return ipa
+
+_BOW_VERB_CUES = frozenset({
+    'take', 'took', 'taken', 'takes', 'taking',
+    'give', 'gave', 'given', 'gives', 'giving',
+    'make', 'made', 'makes', 'making',
+    'deep', 'low', 'graceful', 'slight', 'final', 'curtain',
+})
+
+# Tokens nearby that strongly signal the archery/weapon sense of bow
+# (rhymes with "go"). Used to suppress the gesture default for `bowed` /
+# `bowing` where misaki has no gold entry and would otherwise need the rule
+# to keep its hands off.
+_BOW_ARCHERY_CUES = frozenset({
+    'arrow', 'arrows', 'quiver', 'quivers', 'archery', 'archer', 'archers',
+    'longbow', 'longbows', 'crossbow', 'crossbows', 'bowstring', 'bowstrings',
+    'fletching', 'shaft', 'shafts', 'target', 'targets', 'aim', 'aimed',
+    'aiming', 'nocked', 'nocking', 'drew', 'drawn',
+    'violin', 'violins', 'cello', 'cellos', 'fiddle', 'fiddles', 'viola',
+    'violinist', 'violinists', 'cellist', 'cellists', 'fiddler', 'fiddlers',
+})
+
+# Tokens that follow `bowed` / `bowing` and reinforce the gesture sense
+# (e.g. "bowed his head", "bowed deeply", "bowed low").
+_BOW_GESTURE_NEXT = frozenset({
+    'down', 'to', 'before', 'deeply', 'low', 'slightly', 'gracefully',
+    'his', 'her', 'their', 'my', 'our', 'your',
+    'head', 'heads', 'over', 'forward', 'humbly', 'reverently',
+    'politely', 'stiffly', 'curtly', 'briefly', 'silently',
+})
+
+_CONTENT_COPULAS = frozenset({
+    'is', 'am', 'are', 'was', 'were', 'be', 'been', 'being',
+    'feel', 'feels', 'felt', 'feeling',
+    'seem', 'seems', 'seemed', 'seeming',
+    'appear', 'appears', 'appeared', 'appearing',
+    'remain', 'remains', 'remained', 'remaining',
+    'look', 'looks', 'looked', 'looking',
+    'stay', 'stays', 'stayed', 'staying',
+})
+
+_CONTENT_DEGREE = frozenset({
+    'very', 'quite', 'so', 'too', 'really', 'entirely',
+    'perfectly', 'completely', 'wholly', 'truly', 'thoroughly',
+})
+
+_LEAD_MATERIAL_NEXT = frozenset({
+    'paint', 'pipe', 'pipes', 'piping', 'poisoning', 'poison',
+    'weight', 'weights', 'shot', 'bullet', 'bullets',
+    'crystal', 'acetate', 'solder', 'dust', 'ore',
+    'sheet', 'sheets', 'foil', 'balloon', 'balloons',
+})
+
+_LEAD_MATERIAL_PREV = frozenset({
+    'poisoned', 'toxic', 'molten', 'pure',
+})
+
+_BASS_MUSIC_NEXT = frozenset({
+    'guitar', 'guitars', 'drum', 'drums', 'clef', 'line', 'lines',
+    'player', 'players', 'vocalist', 'vocalists', 'solo', 'solos',
+    'note', 'notes', 'string', 'strings', 'section', 'pedal',
+    'amp', 'amplifier', 'cabinet', 'tuba', 'voice', 'voices',
+})
+
+_BASS_MUSIC_PREV = frozenset({
+    'electric', 'acoustic', 'upright', 'double', 'slap', 'walking',
+    'play', 'plays', 'played', 'playing', 'plucked', 'strummed',
+    'slapped', 'jazz', 'rock', 'funk', 'reggae', 'blues', 'metal',
+    'fretted', 'fretless',
+})
+
+# Adjectives and verbs that disambiguate `row` to the argument sense /raʊ/
+# (rhymes with "cow"). The line/boat sense /roʊ/ remains the default since
+# misaki gold has only `'ɹˈO'` for `row` regardless of context.
+_ROW_ARGUMENT_PREV = frozenset({
+    'huge', 'big', 'loud', 'fierce', 'almighty', 'public', 'family',
+    'terrible', 'awful', 'blazing', 'serious', 'massive', 'furious',
+    'noisy', 'heated', 'bitter', 'nasty', 'ugly', 'screaming',
+    'shouting', 'tearful', 'epic', 'right',
+})
+
+_ROW_ARGUMENT_NEXT = frozenset({
+    'erupted', 'ensued', 'between',
+})
+
+
+_BOW_GESTURE_IPA = {
+    'bow': 'bˈaʊ',
+    'bows': 'bˈaʊz',
+    'bowed': 'bˈaʊd',
+    'bowing': 'bˈaʊɪŋ',
+}
+
+
+def _bow_rule(token, doc):
+    """'bow'/'bows'/'bowed'/'bowing' → /baʊ.../ when the context cues the
+    bowing-gesture sense. Archery/ribbon falls through to misaki's gold for
+    `bow`/`bows`. For `bowed`/`bowing` (no misaki gold entry), default to
+    gesture unless archery cues are present — in fiction the gesture sense
+    is overwhelmingly more common than violin-bowing or arch-shaping."""
+    word = token.text.lower()
+    gesture_ipa = _BOW_GESTURE_IPA.get(word)
+    if gesture_ipa is None:
+        return None
+    window_prev = {t.lower_ for t in doc[max(0, token.i - 4):token.i]}
+    window_next = {t.lower_ for t in doc[token.i + 1:token.i + 4]}
+    if window_prev & _BOW_VERB_CUES:
+        return gesture_ipa
+    if window_next & _BOW_GESTURE_NEXT:
+        return gesture_ipa
+    if token.i + 1 < len(doc) and doc[token.i + 1].lower_ in {'down', 'to', 'before'}:
+        return gesture_ipa
+    if word in {'bowed', 'bowing'}:
+        if window_prev & _BOW_ARCHERY_CUES or window_next & _BOW_ARCHERY_CUES:
+            return None
+        return gesture_ipa
+    return None
+
+
+def _content_rule(token, doc):
+    """'content' → /kənˈtɛnt/ when used predicatively as an adjective.
+    Noun default (/kˈɑntɛnt/) falls through to misaki's gold."""
+    for t in doc[max(0, token.i - 3):token.i]:
+        if t.lower_ in _CONTENT_COPULAS or t.lower_ in _CONTENT_DEGREE:
+            return 'kənˈtɛnt'
+    if token.i + 1 < len(doc) and doc[token.i + 1].lower_ == 'with':
+        return 'kənˈtɛnt'
+    return None
+
+
+def _minute_rule(token, doc):
+    """'minute' → /maɪˈnut/ when adjectival ('tiny').
+    Time-unit default (/mˈɪnət/) falls through to misaki's gold."""
+    if token.i + 1 >= len(doc):
+        return None
+    next_tok = doc[token.i + 1]
+    if next_tok.pos_ not in {'NOUN', 'PROPN'}:
+        return None
+    if token.dep_ not in {'amod', 'compound', 'nmod'}:
+        return None
+    if token.i > 0:
+        prev = doc[token.i - 1].lower_
+        if prev in {'one', 'a', 'per', 'each', 'this'}:
+            return None
+    return 'maɪˈnut'
+
+
+def _lead_rule(token, doc):
+    """'lead' → /lɛd/ when the context cues the metal/material sense.
+    Verb/leader default (/lid/) falls through to misaki's gold."""
+    if token.i + 1 < len(doc) and doc[token.i + 1].lower_ in _LEAD_MATERIAL_NEXT:
+        return 'lˈɛd'
+    window_prev = {t.lower_ for t in doc[max(0, token.i - 3):token.i]}
+    if window_prev & _LEAD_MATERIAL_PREV:
+        return 'lˈɛd'
+    return None
+
+
+def _bass_rule(token, doc):
+    """'bass' → /beɪs/ when the context cues the musical instrument.
+    Fish default (/bæs/) falls through to misaki's gold."""
+    if token.i + 1 < len(doc) and doc[token.i + 1].lower_ in _BASS_MUSIC_NEXT:
+        return 'bˈeɪs'
+    window_prev = {t.lower_ for t in doc[max(0, token.i - 3):token.i]}
+    if window_prev & _BASS_MUSIC_PREV:
+        return 'bˈeɪs'
+    return None
+
+
+def _row_rule(token, doc):
+    """'row' → /raʊ/ when the context cues the argument/quarrel sense.
+    Line/boat default (/roʊ/) falls through to misaki's gold. Misaki has
+    only the line-sense entry, so without this rule "they had a huge row"
+    rhymes with "go". `rows` plural is left alone — line-sense plural is
+    overwhelmingly more common ("rows of houses")."""
+    if token.text.lower() != 'row':
+        return None
+    if token.i >= 2 and (
+        doc[token.i - 2].lower_ == 'in' and doc[token.i - 1].lower_ == 'a'
+    ):
+        return None
+    window_prev = {t.lower_ for t in doc[max(0, token.i - 3):token.i]}
+    if window_prev & _ROW_ARGUMENT_PREV:
+        return 'ɹˈaʊ'
+    if token.i + 1 < len(doc) and doc[token.i + 1].lower_ in _ROW_ARGUMENT_NEXT:
+        return 'ɹˈaʊ'
+    return None
+
+
+def _tearing_rule(token, doc):
+    """'tearing' → /tɪɹɪŋ/ when the context cues the crying sense.
+    Rip default (/tɛɹɪŋ/) falls through to misaki's gold. Misaki gold has
+    only the rip-sense entry for `tearing`, so "her eyes were tearing up"
+    rhymes with "wearing" without this rule."""
+    if token.text.lower() != 'tearing':
+        return None
+    window_prev = {t.lower_ for t in doc[max(0, token.i - 4):token.i]}
+    if window_prev & {'eyes', 'eye'}:
+        return 'tˈɪɹɪŋ'
+    next_tok = doc[token.i + 1] if token.i + 1 < len(doc) else None
+    if next_tok and next_tok.lower_ == 'up':
+        after_next = doc[token.i + 2] if token.i + 2 < len(doc) else None
+        if after_next is None or after_next.is_punct:
+            return 'tˈɪɹɪŋ'
+        if after_next.pos_ == 'ADP':
+            return 'tˈɪɹɪŋ'
+    return None
+
+
+_CONTEXTUAL_RULES = {
+    'bow': _bow_rule,
+    'bows': _bow_rule,
+    'bowed': _bow_rule,
+    'bowing': _bow_rule,
+    'content': _content_rule,
+    'minute': _minute_rule,
+    'lead': _lead_rule,
+    'bass': _bass_rule,
+    'row': _row_rule,
+    'tearing': _tearing_rule,
+}
+
+
+def _is_inside_markdown(text, start, end):
+    """True if text[start:end] sits inside existing `[word](/IPA/)` markdown."""
+    return start > 0 and text[start - 1] == '[' and text[end:end + 3] == '](/'
+
+
+def apply_contextual_overrides(text):
+    """Emit IPA markdown for heteronyms whose pronunciation needs more than
+    a single POS tag. Each rule in `_CONTEXTUAL_RULES` returns an IPA string
+    when its context cue fires, or None to leave the token to misaki's gold.
+
+    Skips tokens already wrapped in `[word](/IPA/)` so user-configured phoneme
+    overrides (which run later) stay authoritative.
+    """
+    if not HAS_SPACY:
+        return text
+    nlp = _get_nlp()
+    if nlp is None:
+        return text
+    doc = nlp(text)
+    replacements = []
+    for token in doc:
+        rule = _CONTEXTUAL_RULES.get(token.text.lower())
+        if rule is None:
+            continue
+        start = token.idx
+        end = start + len(token.text)
+        if _is_inside_markdown(text, start, end):
+            continue
+        ipa = rule(token, doc)
+        if not ipa:
+            continue
+        ipa = _to_misaki_phonemes(ipa)
+        replacements.append((start, end, f'[{token.text}](/{ipa}/)'))
 
     for start, end, hint in reversed(replacements):
         text = text[:start] + hint + text[end:]
@@ -177,7 +473,9 @@ def normalize_unicode(text, is_english=True):
         text = re.sub(r'(\d)\u2013(\d)', r'\1 to \2', text)
     # Remaining en-dashes
     text = text.replace('\u2013', ' - ')
-    text = strip_diacritics(text)
+    if is_english:
+        # misaki's English lexicon is ASCII-only; other languages need diacritics for G2P.
+        text = strip_diacritics(text)
     return text
 
 
@@ -391,12 +689,129 @@ def apply_substitutions(text, substitutions):
         else:
             pattern = re.escape(find)
         flags = 0 if sub.get('case_sensitive', False) else re.IGNORECASE
-        text = re.sub(pattern, replace, text, flags=flags)
+        # Use a lambda for the replacement so backref-looking content in the
+        # user's replace string (e.g. "\1", "\g<0>") is treated as a literal
+        # instead of a regex substitution template.
+        text = re.sub(pattern, lambda _m, r=replace: r, text, flags=flags)
     return text
 
 
+# --- Phoneme overrides + acronym spellout ---
+
+def apply_phoneme_overrides(text, overrides):
+    """Wrap matching words with misaki's inline-phoneme markdown.
+
+    Each entry is a dict with:
+      word: str — the word to match
+      ipa: str — IPA phonemes (misaki assigns rating 5, beating gold/silver)
+      case_sensitive: bool (default False)
+      enabled: bool (default True)
+
+    Emits `[word](/IPA/)` which misaki parses in G2P.preprocess. Words
+    containing non-word chars (apostrophes, hyphens) match without `\\b`
+    anchors so names like O'Brien or Anne-Marie still work.
+    """
+    if not overrides:
+        return text
+    for entry in overrides:
+        if not entry.get('enabled', True):
+            continue
+        word = entry.get('word', '')
+        ipa = entry.get('ipa', '')
+        if not word or not ipa:
+            continue
+        # Dictionaries hand out canonical IPA (eɪ, aʊ, …); Kokoro's vocab keys
+        # the diphthongs as single letters (A, W, …). See _to_misaki_phonemes
+        # for why mixing the two forms makes Kokoro bleed the override audio
+        # onto neighbouring words.
+        ipa = _to_misaki_phonemes(ipa)
+        if re.search(r'\W', word):
+            pattern = re.escape(word)
+        else:
+            pattern = r'\b' + re.escape(word) + r'\b'
+        flags = 0 if entry.get('case_sensitive', False) else re.IGNORECASE
+        # Lambda keeps backref-looking IPA (`\1`, `\g<0>`) as literal text.
+        text = re.sub(
+            pattern,
+            lambda m, p=ipa: f'[{m.group(0)}](/{p}/)',
+            text,
+            flags=flags,
+        )
+    return text
+
+
+# Roman numerals that look like acronyms but are usually section markers.
+_ACRONYM_STOPLIST_HARD = frozenset({
+    'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII',
+})
+
+# Pronounceable acronyms misaki only has lowercase entries for. Skip-set
+# building filters gold to ALL-CAPS keys, which misses these — but misaki
+# itself does case-insensitive lookup, so feeding them through unchanged
+# yields the expected word pronunciation.
+_ACRONYM_EXTRA_SKIP = frozenset({
+    'SCUBA', 'LASER', 'RADAR', 'SONAR', 'SWAT', 'TASER', 'MODEM',
+    'WASP', 'CAPTCHA', 'GULAG',
+})
+
+_ACRONYM_GOLD_CACHE = None
+
+_ACRONYM_PATTERN = re.compile(r'\b[A-Z]{2,6}\b')
+
+
+def _load_acronym_skip_set():
+    """Return all-caps words misaki gold already pronounces.
+
+    Loaded lazily; a failure to read the bundled lexicon falls back to the
+    hard stoplist only so auto-acronym still runs for the obvious cases.
+    """
+    global _ACRONYM_GOLD_CACHE
+    if _ACRONYM_GOLD_CACHE is not None:
+        return _ACRONYM_GOLD_CACHE
+    try:
+        import json
+        import importlib.resources
+        with importlib.resources.open_text(
+                'autiobooks.misaki.data', 'us_gold.json') as f:
+            gold = json.load(f)
+        caps = frozenset(
+            k for k in gold
+            if k.isalpha() and k.isupper() and 2 <= len(k) <= 6
+        )
+        _ACRONYM_GOLD_CACHE = (
+            caps | _ACRONYM_STOPLIST_HARD | _ACRONYM_EXTRA_SKIP
+        )
+    except Exception:
+        _ACRONYM_GOLD_CACHE = frozenset(
+            _ACRONYM_STOPLIST_HARD | _ACRONYM_EXTRA_SKIP
+        )
+    return _ACRONYM_GOLD_CACHE
+
+
+def apply_acronym_spellout(text, enabled):
+    """Rewrite unknown ALL-CAPS tokens as dotted letters.
+
+    `NATO` / `NASA` / `SQL` stay untouched because misaki gold already
+    pronounces them. `CIA` / `FBI` / `HTML` become `C. I. A.` etc. so
+    misaki reads each letter. Off by default — on-by-default would change
+    behavior on every book in the existing user base.
+    """
+    if not enabled:
+        return text
+    skip = _load_acronym_skip_set()
+
+    def _replace(m):
+        word = m.group(0)
+        if word in skip:
+            return word
+        return '. '.join(word) + '.'
+
+    return _ACRONYM_PATTERN.sub(_replace, text)
+
+
 def normalize_text(text, lang='en-us', substitutions=None,
-                    heteronyms=True, contractions=True):
+                    heteronyms=True, contractions=True,
+                    phoneme_overrides=None, auto_acronyms=False):
     """Normalize text before sending to TTS.
 
     English-specific transformations (abbreviation expansion, roman numeral
@@ -404,6 +819,12 @@ def normalize_text(text, lang='en-us', substitutions=None,
     numbers) are applied only when `lang` starts with 'en'. For other
     languages, symbols are stripped to spaces instead of replaced with English
     words.
+
+    Phoneme overrides and auto-acronym spellout are English-only and run
+    after user substitutions, so a rule rewriting `NATO` → `North Atlantic
+    Treaty Organization` suppresses the auto-spellout. Phoneme overrides
+    run last so the emitted `[word](/IPA/)` markdown isn't clobbered by
+    any earlier pass.
     """
     is_english = lang.startswith('en')
     text = normalize_unicode(text, is_english=is_english)
@@ -411,9 +832,13 @@ def normalize_text(text, lang='en-us', substitutions=None,
         text = expand_abbreviations(text)
         text = expand_roman_numerals(text)
         if heteronyms:
+            text = apply_contextual_overrides(text)
             text = resolve_heteronyms(text)
         if contractions:
             text = resolve_contractions(text)
     text = clean_special_characters(text, is_english=is_english)
     text = apply_substitutions(text, substitutions)
+    if is_english:
+        text = apply_acronym_spellout(text, auto_acronyms)
+        text = apply_phoneme_overrides(text, phoneme_overrides)
     return text

@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import threading
@@ -134,7 +135,7 @@ def show_preferences(parent, prefs, apply_theme, save_current_config, add_toolti
     """Open the Preferences dialog.
 
     prefs: dict of tk variables — theme_var, heteronyms, contractions,
-    auto_select, mark_duplicates.
+    auto_select, mark_duplicates, auto_acronyms.
     apply_theme: callable(theme_name) that restyles the app.
     save_current_config: callable() that persists the current config.
     add_tooltip: callable(widget, text) that attaches a tooltip.
@@ -167,6 +168,13 @@ def show_preferences(parent, prefs, apply_theme, save_current_config, add_toolti
     add_tooltip(tp.winfo_children()[-1],
                 'Expand ambiguous contractions using spaCy context.\n'
                 'Requires spaCy + en_core_web_sm.')
+    if 'auto_acronyms' in prefs:
+        tk.Checkbutton(tp, text='Spell out unknown acronyms (CIA, FBI, HTML)',
+                       variable=prefs['auto_acronyms']).pack(anchor='w')
+        add_tooltip(tp.winfo_children()[-1],
+                    'All-caps words (2-6 letters) not already in the TTS\n'
+                    'lexicon get spelled out letter-by-letter. Known\n'
+                    'acronyms like NATO / NASA keep their word pronunciation.')
 
     cl = ttk.LabelFrame(dlg, text='Chapter Loading', padding=10)
     cl.pack(fill=tk.X, padx=15, pady=5)
@@ -282,6 +290,224 @@ def show_substitutions_dialog(parent, initial_subs, on_save):
 
     def save_and_close():
         on_save(local_subs)
+        dlg.destroy()
+
+    ttk.Button(dlg, text='Save', command=save_and_close).pack(
+        side=tk.RIGHT, padx=10, pady=10)
+    ttk.Button(dlg, text='Cancel', command=dlg.destroy).pack(
+        side=tk.RIGHT, pady=10)
+
+
+def show_phoneme_overrides_dialog(parent, initial, on_save):
+    """Open the pronunciation-overrides editor.
+
+    Each entry forces a specific pronunciation for a word by wrapping
+    matches in misaki's inline-phoneme markdown (`[word](/IPA/)`). Use
+    this for names, technical terms, and initialisms the lexicon
+    mispronounces. English voices only.
+
+    initial: current list of override dicts ({word, ipa, case_sensitive, enabled}).
+    on_save: callable(new_overrides) invoked when the user clicks Save.
+    """
+    dlg = tk.Toplevel(parent)
+    dlg.title('Pronunciation Overrides')
+    dlg.geometry('900x520')
+    dlg.resizable(True, True)
+    dlg.grab_set()
+
+    tk.Label(
+        dlg,
+        text='Force a specific pronunciation by entering IPA phonemes. '
+             'Applied to English voices only. Names with apostrophes or '
+             'hyphens (O\'Brien, Anne-Marie) match without word boundaries.',
+        wraplength=860, justify='left').pack(padx=10, pady=(10, 0))
+    tk.Label(
+        dlg,
+        text='IPA cheat-sheet: ˈ primary stress · ˌ secondary · '
+             'ə schwa · ɜ her · æ cat · ʃ ship · θ think · ð this',
+        fg='#555',
+        wraplength=860, justify='left').pack(padx=10, pady=(0, 5))
+
+    list_frame = ttk.Frame(dlg)
+    list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+    cols = ('word', 'ipa', 'case', 'enabled')
+    tree = ttk.Treeview(list_frame, columns=cols, show='headings',
+                        height=10, selectmode='extended')
+    tree.heading('word', text='Word')
+    tree.heading('ipa', text='IPA Phonemes')
+    tree.heading('case', text='Case')
+    tree.heading('enabled', text='Enabled')
+    tree.column('word', width=220)
+    tree.column('ipa', width=320)
+    tree.column('case', width=80, anchor='center')
+    tree.column('enabled', width=80, anchor='center')
+    vsb = ttk.Scrollbar(list_frame, orient='vertical', command=tree.yview)
+    tree.configure(yscrollcommand=vsb.set)
+    vsb.pack(side=tk.RIGHT, fill=tk.Y)
+    tree.pack(fill=tk.BOTH, expand=True)
+
+    local = [dict(o) for o in initial]
+
+    def refresh():
+        tree.delete(*tree.get_children())
+        for o in local:
+            cs = 'Yes' if o.get('case_sensitive') else 'No'
+            en = 'Yes' if o.get('enabled', True) else 'No'
+            tree.insert('', 'end', values=(
+                o.get('word', ''), o.get('ipa', ''), cs, en))
+
+    refresh()
+
+    btn_frame = ttk.Frame(dlg)
+    btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+    add_frame = ttk.Frame(dlg)
+    add_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+    tk.Label(add_frame, text='Word:').pack(side=tk.LEFT)
+    word_entry = ttk.Entry(add_frame, width=18)
+    word_entry.pack(side=tk.LEFT, padx=(2, 10))
+    tk.Label(add_frame, text='IPA:').pack(side=tk.LEFT)
+    ipa_entry = ttk.Entry(add_frame, width=22)
+    ipa_entry.pack(side=tk.LEFT, padx=(2, 10))
+    case_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(add_frame, text='Case sensitive',
+                   variable=case_var).pack(side=tk.LEFT)
+    enabled_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(add_frame, text='Enabled',
+                   variable=enabled_var).pack(side=tk.LEFT)
+
+    def add_override():
+        w = word_entry.get().strip()
+        i = ipa_entry.get().strip()
+        if not w or not i:
+            return
+        local.append({
+            'word': w,
+            'ipa': i,
+            'case_sensitive': case_var.get(),
+            'enabled': enabled_var.get(),
+        })
+        word_entry.delete(0, tk.END)
+        ipa_entry.delete(0, tk.END)
+        refresh()
+
+    def remove_override():
+        sel = tree.selection()
+        if not sel:
+            return
+        for idx in sorted((tree.index(s) for s in sel), reverse=True):
+            del local[idx]
+        refresh()
+
+    def toggle_enabled():
+        sel = tree.selection()
+        if not sel:
+            return
+        idxs = [tree.index(s) for s in sel]
+        new_value = not all(local[i].get('enabled', True) for i in idxs)
+        for i in idxs:
+            local[i]['enabled'] = new_value
+        refresh()
+        for i in idxs:
+            tree.selection_add(tree.get_children()[i])
+
+    def toggle_case_sensitive():
+        sel = tree.selection()
+        if not sel:
+            return
+        idxs = [tree.index(s) for s in sel]
+        new_value = not all(local[i].get('case_sensitive', False) for i in idxs)
+        for i in idxs:
+            local[i]['case_sensitive'] = new_value
+        refresh()
+        for i in idxs:
+            tree.selection_add(tree.get_children()[i])
+
+    def import_json():
+        path = filedialog.askopenfilename(
+            parent=dlg, title='Import pronunciation overrides',
+            filetypes=[('JSON files', '*.json'), ('All files', '*.*')])
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            messagebox.showerror('Import failed', f'Could not read {path}:\n{e}', parent=dlg)
+            return
+        if not isinstance(data, list):
+            messagebox.showerror('Import failed',
+                                 'Expected a JSON list of override objects.', parent=dlg)
+            return
+        existing = {o.get('word', '').lower() for o in local}
+        added = skipped = 0
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            w = str(entry.get('word', '')).strip()
+            i = str(entry.get('ipa', '')).strip()
+            if not w or not i:
+                continue
+            if w.lower() in existing:
+                skipped += 1
+                continue
+            local.append({
+                'word': w,
+                'ipa': i,
+                'case_sensitive': bool(entry.get('case_sensitive', False)),
+                'enabled': bool(entry.get('enabled', True)),
+            })
+            existing.add(w.lower())
+            added += 1
+        refresh()
+        messagebox.showinfo(
+            'Import complete',
+            f'Added {added} override(s). Skipped {skipped} duplicate(s).',
+            parent=dlg)
+
+    ttk.Button(btn_frame, text='Add', command=add_override).pack(
+        side=tk.LEFT, padx=3)
+    ttk.Button(btn_frame, text='Remove Selected',
+               command=remove_override).pack(side=tk.LEFT, padx=3)
+    ttk.Button(btn_frame, text='Toggle Enabled',
+               command=toggle_enabled).pack(side=tk.LEFT, padx=3)
+    ttk.Button(btn_frame, text='Toggle Case Sensitive',
+               command=toggle_case_sensitive).pack(side=tk.LEFT, padx=3)
+    ttk.Button(btn_frame, text='Import JSON…',
+               command=import_json).pack(side=tk.LEFT, padx=3)
+
+    def export_json():
+        if not local:
+            messagebox.showinfo(
+                'Nothing to export',
+                'There are no pronunciation overrides to export.',
+                parent=dlg)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=dlg, title='Export pronunciation overrides',
+            defaultextension='.json',
+            initialfile='pronunciation_overrides.json',
+            filetypes=[('JSON files', '*.json'), ('All files', '*.*')])
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(local, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            messagebox.showerror(
+                'Export failed', f'Could not write {path}:\n{e}', parent=dlg)
+            return
+        messagebox.showinfo(
+            'Export complete',
+            f'Exported {len(local)} override(s) to:\n{path}',
+            parent=dlg)
+
+    ttk.Button(btn_frame, text='Export JSON…',
+               command=export_json).pack(side=tk.LEFT, padx=3)
+
+    def save_and_close():
+        on_save(local)
         dlg.destroy()
 
     ttk.Button(dlg, text='Save', command=save_and_close).pack(

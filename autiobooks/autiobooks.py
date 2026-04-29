@@ -15,7 +15,7 @@ from .engine import set_gpu_acceleration, convert_text_to_wav_file
 from .engine import create_m4b, encode_chapter_to_m4a
 from .engine import concat_audio_files
 from .engine import convert_chapters_to_wav
-from .engine import safe_stem
+from .engine import safe_stem, chapter_wav_name
 from .runtime import ensure_cuda
 from .epub_parser import (
     get_book, get_book_cached, get_title, get_author, get_cover_image,
@@ -26,6 +26,7 @@ from .dialogs import (
     show_append_dialog as _show_append_dialog_impl,
     show_preferences as _show_preferences_impl,
     show_substitutions_dialog as _show_substitutions_dialog_impl,
+    show_phoneme_overrides_dialog as _show_phoneme_overrides_dialog_impl,
 )
 from .batch_window import show_batch_window as _show_batch_window_impl
 from .chapter_tree import ChapterTreeView
@@ -355,12 +356,22 @@ def start_gui():
             save_config(get_current_config())
         _show_substitutions_dialog_impl(root, word_substitutions, on_save)
 
+    def show_phoneme_overrides_dialog():
+        def on_save(new_overrides):
+            nonlocal phoneme_overrides
+            phoneme_overrides = new_overrides
+            save_config(get_current_config())
+        _show_phoneme_overrides_dialog_impl(
+            root, phoneme_overrides, on_save)
+
     menubar = tk.Menu(root)
     tools_menu = tk.Menu(menubar, tearoff=0)
     tools_menu.add_command(label='Append M4B files...', command=show_append_dialog)
     tools_menu.add_command(label='Batch Queue...', command=lambda: show_batch_window())
     tools_menu.add_command(label='Word Substitutions...',
                            command=show_substitutions_dialog)
+    tools_menu.add_command(label='Pronunciation Overrides...',
+                           command=show_phoneme_overrides_dialog)
     if platform.system() == "Windows":
         from .runtime import check_nvidia_gpu
         if check_nvidia_gpu():
@@ -374,6 +385,7 @@ def start_gui():
     pref_contractions = tk.BooleanVar(value=True)
     pref_auto_select = tk.BooleanVar(value=True)
     pref_mark_duplicates = tk.BooleanVar(value=True)
+    pref_auto_acronyms = tk.BooleanVar(value=False)
 
     def show_preferences():
         _show_preferences_impl(
@@ -384,6 +396,7 @@ def start_gui():
                 'contractions': pref_contractions,
                 'auto_select': pref_auto_select,
                 'mark_duplicates': pref_mark_duplicates,
+                'auto_acronyms': pref_auto_acronyms,
             },
             apply_theme=apply_theme,
             save_current_config=lambda: save_config(get_current_config()),
@@ -472,9 +485,17 @@ def start_gui():
             on_detect_titles_changed()
         except (TypeError, ValueError):
             pass
-    last_directory = config.get('last_directory', '')
-    last_output_directory = config.get('last_output_directory', '')
+    def _validated_dir(value):
+        # If the user deletes a remembered directory between sessions, fall
+        # back to empty so the file dialog opens at the platform default
+        # rather than at a stale path that Tk silently swallows.
+        return value if value and Path(value).is_dir() else ''
+
+    last_directory = _validated_dir(config.get('last_directory', ''))
+    last_output_directory = _validated_dir(
+        config.get('last_output_directory', ''))
     word_substitutions = config.get('word_substitutions', [])
+    phoneme_overrides = config.get('phoneme_overrides', [])
     if config.get('theme') in THEMES:
         theme_var.set(config['theme'])
         apply_theme(config['theme'])
@@ -486,6 +507,8 @@ def start_gui():
         pref_auto_select.set(config['auto_select'])
     if 'mark_duplicates' in config:
         pref_mark_duplicates.set(config['mark_duplicates'])
+    if 'auto_acronyms' in config:
+        pref_auto_acronyms.set(config['auto_acronyms'])
 
     def get_current_config():
         return {
@@ -502,11 +525,13 @@ def start_gui():
             'last_directory': last_directory,
             'last_output_directory': last_output_directory,
             'word_substitutions': word_substitutions,
+            'phoneme_overrides': phoneme_overrides,
             'theme': theme_var.get(),
             'heteronyms': pref_heteronyms.get(),
             'contractions': pref_contractions.get(),
             'auto_select': pref_auto_select.get(),
             'mark_duplicates': pref_mark_duplicates.get(),
+            'auto_acronyms': pref_auto_acronyms.get(),
         }
 
     def on_close():
@@ -535,6 +560,8 @@ def start_gui():
                 'gpu_acceleration': gpu_acceleration,
             },
             get_substitutions=lambda: word_substitutions,
+            get_phoneme_overrides=lambda: phoneme_overrides,
+            get_auto_acronyms=lambda: pref_auto_acronyms.get(),
         )
 
     ttk.Separator(root, orient='horizontal').pack(fill='x', padx=5, pady=2)
@@ -569,16 +596,10 @@ def start_gui():
     def select_all():
         if chapter_tree_view:
             chapter_tree_view.select_all()
-        else:
-            for var in checkbox_vars.values():
-                var.set(True)
 
     def clear_all():
         if chapter_tree_view:
             chapter_tree_view.clear_all()
-        else:
-            for var in checkbox_vars.values():
-                var.set(False)
 
     generating_preview = False
 
@@ -611,7 +632,9 @@ def start_gui():
         text = normalize_text(text, lang=get_language_from_voice(voice),
                               substitutions=word_substitutions,
                               heteronyms=pref_heteronyms.get(),
-                              contractions=pref_contractions.get())
+                              contractions=pref_contractions.get(),
+                              phoneme_overrides=phoneme_overrides,
+                              auto_acronyms=pref_auto_acronyms.get())
         generating_preview = True
         play_label.config(text="...")
 
@@ -779,7 +802,9 @@ def start_gui():
             container, book, chapters_from_book, metadata,
             on_selection_change=_sync_checkbox_vars_from_tree,
             auto_select=pref_auto_select.get(),
-            mark_duplicates=pref_mark_duplicates.get())
+            mark_duplicates=pref_mark_duplicates.get(),
+            on_play_preview=(handle_chapter_click
+                             if audio_available else None))
 
         # Remember directory
         last_directory = str(Path(file_path).parent)
@@ -835,24 +860,13 @@ def start_gui():
                 if not chapters_selected:
                     if chapter_tree_view:
                         chapter_tree_view.select_all()
-                    else:
-                        for var in checkbox_vars.values():
-                            var.set(True)
                     chapters_selected = list(checkbox_vars.keys())
                 set_gpu_acceleration(gpu_acceleration.get())
                 filename = Path(file_path).name
                 wav_dir = Path(file_path).parent
                 safe = safe_stem(Path(filename).stem, wav_dir)
-                all_chapter_wav_files = [
-                    str(wav_dir / f'{safe}_chapter_{i}.wav')
-                    for i in range(1, len(chapters_selected) + 1)
-                ]
                 out_fmt = format_combo.get()
                 enc_ext = '.m4a' if out_fmt == 'm4b' else fmt_info['ext']
-                all_chapter_m4a_files = [
-                    str(wav_dir / f'{safe}_chapter_{i}_enc{enc_ext}')
-                    for i in range(1, len(chapters_selected) + 1)
-                ]
                 try:
                     chapter_num = int(chapter_entry.get())
                 except ValueError:
@@ -947,6 +961,15 @@ def start_gui():
                         text = f"{title} by {creator}.\n{text}"
                     chapter_texts.append(text)
 
+                all_chapter_wav_files = [
+                    chapter_wav_name(safe, t, wav_dir)
+                    for t in chapter_texts
+                ]
+                all_chapter_m4a_files = [
+                    str(wav_dir / f'{safe}_chapter_{i}_enc{enc_ext}')
+                    for i in range(1, len(chapter_texts) + 1)
+                ]
+
                 result = convert_chapters_to_wav(
                     chapter_texts, voice, speed, wav_dir,
                     safe, encode_executor,
@@ -954,6 +977,8 @@ def start_gui():
                     bitrate=bitrate_combo.get(), vbr=use_vbr.get(),
                     chapter_gap=chapter_gap,
                     substitutions=word_substitutions,
+                    phoneme_overrides=phoneme_overrides,
+                    auto_acronyms=pref_auto_acronyms.get(),
                     heteronyms=pref_heteronyms.get(),
                     contractions=pref_contractions.get(),
                     resume=resume,
@@ -989,7 +1014,8 @@ def start_gui():
                 if out_fmt == 'm4b':
                     converted_titles = []
                     for i, chapter in enumerate(chapters_selected):
-                        wav_name = str(wav_dir / f'{safe}_chapter_{i+1}.wav')
+                        wav_name = chapter_wav_name(
+                            safe, chapter_texts[i], wav_dir)
                         if wav_name in wav_files:
                             if chapter_titles is not None:
                                 converted_titles.append(chapter_titles[i])
@@ -1088,17 +1114,26 @@ def start_gui():
         voice = deemojify_voice(voice_combo.get())
         speed = speed_entry.get()
 
-        # Check for existing wav files from a previous run
+        # Check for existing wav files from a previous run. Build the same
+        # chapter_texts that run_conversion will build so the hash-based
+        # wav filenames line up — otherwise the resume prompt would look
+        # at the wrong paths and miss cached audio.
         resume = False
         filename = Path(file_path).name
         wav_dir = Path(file_path).parent
         resume_stem = safe_stem(Path(filename).stem, wav_dir)
         chapters_to_check = [ch for ch, var in checkbox_vars.items()
                              if var.get()] or list(checkbox_vars.keys())
+        resume_chapter_texts = []
+        for _i, _ch in enumerate(chapters_to_check, start=1):
+            _text = _ch.extracted_text
+            if _i == 1 and read_title_author_bool.get():
+                _text = f"{title_override} by {author_override}.\n{_text}"
+            resume_chapter_texts.append(_text)
         existing_wavs = [
-            str(wav_dir / f'{resume_stem}_chapter_{i}.wav')
-            for i in range(1, len(chapters_to_check) + 1)
-            if (wav_dir / f'{resume_stem}_chapter_{i}.wav').exists()
+            chapter_wav_name(resume_stem, t, wav_dir)
+            for t in resume_chapter_texts
+            if Path(chapter_wav_name(resume_stem, t, wav_dir)).exists()
         ]
         if existing_wavs:
             answer = messagebox.askyesnocancel(

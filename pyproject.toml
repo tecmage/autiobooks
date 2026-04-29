@@ -1,9 +1,10 @@
 [project]
 name = "autiobooks"
-version = "2.0.0"
+version = "2.1.0"
 description = "Automatically convert epubs to audiobooks"
 
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10,<3.13" # librosa/llvmlite have no support for python > 3.12
 dependencies = [
     "pillow (>=10.0.0)",
@@ -19,6 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dnd = ["tkinterdnd2 (>=0.3.0)"]
+# `cmudict` is needed by scripts/audit_pronunciations.py and
+# scripts/audit_heteronyms.py only — not by the shipped app.
+dev = ["pytest (>=7.0.0)", "cmudict (>=1.0.0)"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

@@ -277,6 +277,8 @@ def cmd_convert(args):
     from .config import load_config
     config = load_config()
     substitutions = config.get('word_substitutions')
+    phoneme_overrides = config.get('phoneme_overrides')
+    auto_acronyms = config.get('auto_acronyms', False)
 
     # GPU setup — autodetect CUDA unless --no-gpu
     from .engine import set_gpu_acceleration, get_gpu_acceleration_available
@@ -306,15 +308,16 @@ def cmd_convert(args):
 
     # Conversion
     from .engine import (convert_chapters_to_wav, create_m4b,
-                         concat_audio_files, _INTERMEDIATE_EXTS, safe_stem)
+                         concat_audio_files, _INTERMEDIATE_EXTS, safe_stem,
+                         chapter_wav_name)
 
     wav_dir = Path(input_path).parent
     stem = safe_stem(Path(input_path).stem, wav_dir)
     enc_ext = _INTERMEDIATE_EXTS.get(out_format, '.m4a')
 
+    chapter_texts = [ch.extracted_text for ch in chapters_selected]
     all_chapter_wav_files = [
-        str(wav_dir / f'{stem}_chapter_{i}.wav')
-        for i in range(1, len(chapters_selected) + 1)
+        chapter_wav_name(stem, t, wav_dir) for t in chapter_texts
     ]
     all_chapter_enc_files = [
         str(wav_dir / f'{stem}_chapter_{i}_enc{enc_ext}')
@@ -369,10 +372,12 @@ def cmd_convert(args):
             state['words_done'] += word_counts[i - 1]
 
         result = convert_chapters_to_wav(
-            [ch.extracted_text for ch in chapters_selected],
+            chapter_texts,
             voice, speed, wav_dir, stem, encode_executor,
             out_format=out_format, bitrate=bitrate, vbr=vbr,
             chapter_gap=chapter_gap, substitutions=substitutions,
+            phoneme_overrides=phoneme_overrides,
+            auto_acronyms=auto_acronyms,
             heteronyms=heteronyms, contractions=contractions,
             resume=resume,
             on_chapter_start=on_start,
@@ -400,7 +405,7 @@ def cmd_convert(args):
             if chapter_titles is not None:
                 converted_titles = []
                 for i, chapter in enumerate(chapters_selected):
-                    wav_name = str(wav_dir / f'{stem}_chapter_{i+1}.wav')
+                    wav_name = chapter_wav_name(stem, chapter_texts[i], wav_dir)
                     if wav_name in wav_files:
                         converted_titles.append(chapter_titles[i])
                 if not converted_titles:

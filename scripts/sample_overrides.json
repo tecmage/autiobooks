@@ -1,0 +1,1766 @@
+[
+  {
+    "word": "absconding",
+    "ipa": "æbskˈɑndɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "abstracted",
+    "ipa": "ˈæbstɹˌæktɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "absurdities",
+    "ipa": "əbsˈɜɹdəɾiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "accenting",
+    "ipa": "ˈæksˌɛntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "aches",
+    "ipa": "ˈeɪks",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "acidified",
+    "ipa": "əsˈɪdəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "addressed",
+    "ipa": "ədɹˈɛst",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "amplifying",
+    "ipa": "ˈæmpləfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "antes",
+    "ipa": "ˈæntiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "apaches",
+    "ipa": "əpˈæʧiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "arses",
+    "ipa": "ˈɑɹsɪz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "autographed",
+    "ipa": "ˈɔɾəɡɹˌæft",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "autographs",
+    "ipa": "ˈɔɾəɡɹˌæfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "autopsied",
+    "ipa": "ˈɔtˌɑpsid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "baas",
+    "ipa": "bˈɑz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bagged",
+    "ipa": "bˈæɡd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bailed",
+    "ipa": "bˈeɪld",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ballets",
+    "ipa": "bælˈeɪz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "banged",
+    "ipa": "bˈæŋd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "beatified",
+    "ipa": "biˈæɾəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bellies",
+    "ipa": "bˈɛliz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "benefiting",
+    "ipa": "bˈɛnəfɪtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "benefitted",
+    "ipa": "bˈɛnəfɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "benefitting",
+    "ipa": "bˈɛnəfɪtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "benighted",
+    "ipa": "bɪnˈaɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "benning",
+    "ipa": "bˈɛnɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bikinis",
+    "ipa": "bəkˈiniz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "boardinghouses",
+    "ipa": "bˈɔɹdɪŋhˌaʊsɪz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bobcats",
+    "ipa": "bˈɑbkˌætz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bogging",
+    "ipa": "bˈɔɡɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bolling",
+    "ipa": "bˈoʊlɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "borrowing",
+    "ipa": "bˈɑɹoʊɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "breeches",
+    "ipa": "bɹˈiʧɪz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bullfights",
+    "ipa": "bˈʊlfˌaɪtz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bullied",
+    "ipa": "bˈʊlid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bullies",
+    "ipa": "bˈʊliz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "bureaus",
+    "ipa": "bjˈʊɹoʊz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "burlapped",
+    "ipa": "bˈɜɹlˌæpt",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "busied",
+    "ipa": "bˈɪzid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "candidacies",
+    "ipa": "kˈændədəsiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "captaining",
+    "ipa": "kˈæptənɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "certifying",
+    "ipa": "sˈɜɹɾəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "chickening",
+    "ipa": "ʧˈɪkənɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "chitlins",
+    "ipa": "ʧˈɪtlɪnz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "chitterlings",
+    "ipa": "ʧˈɪɾɜɹlɪŋz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "clarifying",
+    "ipa": "klˈɛɹəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "cloths",
+    "ipa": "klˈɔθs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "codified",
+    "ipa": "kˈɑdəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "complied",
+    "ipa": "kəmplˈaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "concocting",
+    "ipa": "kənkˈɑktɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "contracting",
+    "ipa": "kˈɑntɹˌæktɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "copied",
+    "ipa": "kˈɑpid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "copycatting",
+    "ipa": "kˈɑpikˌætɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "couched",
+    "ipa": "kˈaʊʧt",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "crucified",
+    "ipa": "kɹˈusəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "cussed",
+    "ipa": "kˈʌst",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "czechs",
+    "ipa": "ʧˈɛks",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "dallied",
+    "ipa": "dˈælid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "dammed",
+    "ipa": "dˈæmd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "daubed",
+    "ipa": "dˈɔbd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "debuts",
+    "ipa": "deɪbjˈuz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "decanting",
+    "ipa": "dəkˈæntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "decertified",
+    "ipa": "disˈɜɹɾəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "dehumidified",
+    "ipa": "dˌihjˌumˈɪdəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "deified",
+    "ipa": "dˈiəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "delisting",
+    "ipa": "dilˈɪstɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "demos",
+    "ipa": "dˈɛmoʊz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "deprogramming",
+    "ipa": "dipɹˈoʊɡɹæmɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "diagraming",
+    "ipa": "dˈaɪəɡɹˌæmɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "disqualifying",
+    "ipa": "dɪskwˈɑləfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "divvied",
+    "ipa": "dˈɪvid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "documenting",
+    "ipa": "dˈɑkjəməntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "doffing",
+    "ipa": "dˈɔfɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "drawing",
+    "ipa": "dɹˈɔɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "dueled",
+    "ipa": "dˈuəld",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "dunned",
+    "ipa": "dˈʌnd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "earring",
+    "ipa": "ˈɪɹɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "encroaching",
+    "ipa": "ɪnkɹˈoʊʧɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "encrusting",
+    "ipa": "ɛnkɹˈʌstɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "engulfing",
+    "ipa": "ɪnɡˈʌlfɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "envied",
+    "ipa": "ˈɛnvid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "escorted",
+    "ipa": "ˈɛskˌɔɹtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "escorting",
+    "ipa": "ˈɛskˌɔɹtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exalting",
+    "ipa": "ɪɡzˈɔltɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exclaiming",
+    "ipa": "ɪksklˈeɪmɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "excretes",
+    "ipa": "ɪkskɹˈitz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exemplified",
+    "ipa": "ɪɡzˈɛmpləfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exemplifying",
+    "ipa": "ɪɡzˈɛmpləfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exempting",
+    "ipa": "ɪɡzˈɛmptɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exerting",
+    "ipa": "ɪɡzˈɜɹtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "exhorting",
+    "ipa": "ɪɡzˈɔɹtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "expanding",
+    "ipa": "ɪkspˈændɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "expecting",
+    "ipa": "ɪkspˈɛktɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "explaining",
+    "ipa": "ɪksplˈeɪnɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "expounding",
+    "ipa": "ɪkspˈaʊndɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "expressing",
+    "ipa": "ɪkspɹˈɛsɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "extinguishing",
+    "ipa": "ɪkstˈɪŋɡwɪʃɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "falsified",
+    "ipa": "fˈɔlsəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "falsifying",
+    "ipa": "fˈɔlsəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fancied",
+    "ipa": "fˈænsid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ferried",
+    "ipa": "fˈɛɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fidgeting",
+    "ipa": "fˈɪʤətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "filets",
+    "ipa": "fɪlˈeɪz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fisticuffs",
+    "ipa": "fˈɪstɪkˌʌfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "focussed",
+    "ipa": "fˈoʊkəst",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fomenting",
+    "ipa": "foʊmˈɛntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "forewarning",
+    "ipa": "fɔɹwˈɔɹnɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fragmented",
+    "ipa": "fɹˈæɡməntɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fragmenting",
+    "ipa": "fɹˈæɡməntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fuelled",
+    "ipa": "fjˈuəld",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fulfilled",
+    "ipa": "fʊlfˈɪld",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "fulfilling",
+    "ipa": "fʊlfˈɪlɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "glorifying",
+    "ipa": "ɡlˈɔɹəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "gnawing",
+    "ipa": "nˈɔɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "graphs",
+    "ipa": "ɡɹˈæfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "gratified",
+    "ipa": "ɡɹˈæɾəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "gussied",
+    "ipa": "ɡˈʌsid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "gypped",
+    "ipa": "ʤˈɪpt",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "harnessing",
+    "ipa": "hˈɑɹnəsɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "harried",
+    "ipa": "hˈɛɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "harvesting",
+    "ipa": "hˈɑɹvəstɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "identifying",
+    "ipa": "aɪdˈɛntəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "imagines",
+    "ipa": "ɪmˈæʤənz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "indemnified",
+    "ipa": "ɪndˈɛmnəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "inhibited",
+    "ipa": "ɪnhˈɪbətɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "inhibiting",
+    "ipa": "ɪnhˈɪbətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "intensifying",
+    "ipa": "ɪntˈɛnsəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "inventoried",
+    "ipa": "ˈɪnvəntˌɔɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "issues",
+    "ipa": "ˈɪʃuz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "jellies",
+    "ipa": "ʤˈɛliz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "jettisoning",
+    "ipa": "ʤˈɛɾəsənɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "jimmied",
+    "ipa": "ʤˈɪmid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "justifying",
+    "ipa": "ʤˈʌstəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "kidnaping",
+    "ipa": "kˈɪdnˌæpɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "launching",
+    "ipa": "lˈɔnʧɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "leafed",
+    "ipa": "lˈift",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "leapfrogged",
+    "ipa": "lˈipfɹˌɔɡd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "leapfrogging",
+    "ipa": "lˈipfɹˌɔɡɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "libbed",
+    "ipa": "lˈɪbd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "limiting",
+    "ipa": "lˈɪmətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "liquefied",
+    "ipa": "lˈɪkwəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "lithographs",
+    "ipa": "lˈɪθəɡɹˌæfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "loathing",
+    "ipa": "lˈoʊθɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "lobbied",
+    "ipa": "lˈɑbid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "magnified",
+    "ipa": "mˈæɡnəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "magnifying",
+    "ipa": "mˈæɡnəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "manes",
+    "ipa": "mˈeɪnz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "manifesting",
+    "ipa": "mˈænəfˌɛstɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "maxis",
+    "ipa": "mˈæksiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mended",
+    "ipa": "mˈɛndɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "misidentifying",
+    "ipa": "mˌɪsaɪdˈɛntəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "misrepresenting",
+    "ipa": "mˌɪsɹˌɛpɹəzˈɛntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "modifying",
+    "ipa": "mˈɑdəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mollified",
+    "ipa": "mˈɑləfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "monogrammed",
+    "ipa": "mˈɑnəɡɹˌæmd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mopeds",
+    "ipa": "mˈoʊpˌɛdz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "morphs",
+    "ipa": "mˈɔɹfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mortified",
+    "ipa": "mˈɔɹɾəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mothballing",
+    "ipa": "mˈɔθbˌɔlɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "muddied",
+    "ipa": "mˈʌdid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "multiplied",
+    "ipa": "mˈʌltəplˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "multiplying",
+    "ipa": "mˈʌltəplˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mummifying",
+    "ipa": "mˈʌməfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "muskrats",
+    "ipa": "mˈʌskɹˌætz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mutinied",
+    "ipa": "mjˈutənid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "mystified",
+    "ipa": "mˈɪstəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "newsies",
+    "ipa": "nˈuziz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "norred",
+    "ipa": "nˈɔɹd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "notified",
+    "ipa": "nˈoʊɾəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "notifying",
+    "ipa": "nˈoʊɾəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "nullified",
+    "ipa": "nˈʌləfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "nullifying",
+    "ipa": "nˈʌləfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "nymphs",
+    "ipa": "nˈɪmfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "occupying",
+    "ipa": "ˈɑkjəpˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "outfitted",
+    "ipa": "ˈaʊtfˌɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "outgunned",
+    "ipa": "ˌaʊtɡˈʌnd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "outmanned",
+    "ipa": "ˌaʊtmˈænd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "outstripped",
+    "ipa": "ˌaʊtstɹˈɪpt",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pacified",
+    "ipa": "pˈæsəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pampas",
+    "ipa": "pˈæmpəz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "paralyzes",
+    "ipa": "pˈɛɹəlˌaɪzɪz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "parodied",
+    "ipa": "pˈɛɹədid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "parried",
+    "ipa": "pˈɛɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pas",
+    "ipa": "pˈɑz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "permitted",
+    "ipa": "pˈɜɹmɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "permitting",
+    "ipa": "pˈɜɹmɪtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "phonetics",
+    "ipa": "fənˈɛɾɪks",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "photographs",
+    "ipa": "fˈoʊɾəɡɹˌæfs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "picketed",
+    "ipa": "pˈɪkətɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "picketing",
+    "ipa": "pˈɪkətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "piggybacking",
+    "ipa": "pˈɪɡibˌækɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pigmied",
+    "ipa": "pˈɪɡmid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pitied",
+    "ipa": "pˈɪɾid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ponied",
+    "ipa": "pˈoʊnid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "prepaying",
+    "ipa": "pɹˌipˈeɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "preplanning",
+    "ipa": "pɹˌiplˈænɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pretending",
+    "ipa": "pɹitˈɛndɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pried",
+    "ipa": "pɹˈaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "programing",
+    "ipa": "pɹˈoʊɡɹˌæmɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "prophesied",
+    "ipa": "pɹˈɑfəsˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "punishing",
+    "ipa": "pˈʌnɪʃɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pussies",
+    "ipa": "pˈʊsiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "pussyfooting",
+    "ipa": "pˈʊsifˌʊtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "qualifying",
+    "ipa": "kwˈɑləfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "queried",
+    "ipa": "kwˈɪɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "rallied",
+    "ipa": "ɹˈælid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ratified",
+    "ipa": "ɹˈæɾəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ratifying",
+    "ipa": "ɹˈæɾəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "reacting",
+    "ipa": "ɹiˈæktɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "readied",
+    "ipa": "ɹˈɛdid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "readmitted",
+    "ipa": "ɹˌiədmˈɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "reawakening",
+    "ipa": "ɹˌiəwˈeɪkənɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "rebuilding",
+    "ipa": "ɹibˈɪldɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "recanting",
+    "ipa": "ɹəkˈæntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "recasting",
+    "ipa": "ɹikˈæstɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "rectifying",
+    "ipa": "ɹˈɛktəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "refinishing",
+    "ipa": "ɹifˈɪnɪʃɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "refurbishing",
+    "ipa": "ɹifˈɜɹbɪʃɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "regrouping",
+    "ipa": "ɹˌiɡɹˈupɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "rejoining",
+    "ipa": "ɹiʤˈɔɪnɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "remarried",
+    "ipa": "ɹimˈɛɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "remedied",
+    "ipa": "ɹˈɛmədid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "reopening",
+    "ipa": "ɹiˈoʊpənɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "repainting",
+    "ipa": "ɹipˈeɪntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "repaying",
+    "ipa": "ɹipˈeɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "replanting",
+    "ipa": "ɹiplˈæntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "repositioning",
+    "ipa": "ɹˌipəzˈɪʃənɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "reprogrammed",
+    "ipa": "ɹipɹˈoʊɡɹˌæmd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "reprogramming",
+    "ipa": "ɹipɹˈoʊɡɹˌæmɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "researching",
+    "ipa": "ɹˈisˌɜɹʧɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "restocking",
+    "ipa": "ɹistˈɑkɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "resubmitted",
+    "ipa": "ɹˌisəbmˈɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "resubmitting",
+    "ipa": "ɹˌisəbmˈɪtɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "retelling",
+    "ipa": "ɹitˈɛlɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "retooling",
+    "ipa": "ɹitˈulɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "retouching",
+    "ipa": "ɹitˈʌʧɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "retraining",
+    "ipa": "ɹitɹˈeɪnɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "retried",
+    "ipa": "ɹitɹˈaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "russified",
+    "ipa": "ɹˈʌsəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "salted",
+    "ipa": "sˈɔltɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "sandbagged",
+    "ipa": "sˈændbˌæɡd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "scarred",
+    "ipa": "skˈɑɹd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "scurried",
+    "ipa": "skˈɜɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "secondaries",
+    "ipa": "sˈɛkəndˌɛɹiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "seconded",
+    "ipa": "sˈɛkəndɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "selecting",
+    "ipa": "səlˈɛktɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "shellacking",
+    "ipa": "ʃˈɛlækɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "sidestepped",
+    "ipa": "sˈaɪdstˌɛpt",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "signifying",
+    "ipa": "sˈɪɡnəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "sikhs",
+    "ipa": "sˈiks",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "simplifying",
+    "ipa": "sˈɪmpləfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "skyrocketing",
+    "ipa": "skˈaɪɹˌɑkətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "smooths",
+    "ipa": "smˈuðz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "soliciting",
+    "ipa": "səlˈɪsətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "solidified",
+    "ipa": "səlˈɪdəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "solidifying",
+    "ipa": "səlˈɪdəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "sones",
+    "ipa": "sˈoʊnz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "sows",
+    "ipa": "sˈoʊz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "specified",
+    "ipa": "spˈɛsəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "specifying",
+    "ipa": "spˈɛsəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "stipes",
+    "ipa": "stˈaɪps",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "stomachs",
+    "ipa": "stˈʌməks",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "subtracting",
+    "ipa": "səbtɹˈæktɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "surveyed",
+    "ipa": "sˈɜɹvˌeɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "surveying",
+    "ipa": "sˈɜɹvˌeɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "swallowing",
+    "ipa": "swˈɑloʊɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "testified",
+    "ipa": "tˈɛstəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "testifying",
+    "ipa": "tˈɛstəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "thawing",
+    "ipa": "θˈɔɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ticketed",
+    "ipa": "tˈɪkətɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "ticketing",
+    "ipa": "tˈɪkətɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "tinged",
+    "ipa": "tˈɪŋd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "toiled",
+    "ipa": "tˈɔɪld",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "transgressing",
+    "ipa": "tɹænzɡɹˈɛsɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "traumas",
+    "ipa": "tɹˈɔməz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "truths",
+    "ipa": "tɹˈuθs",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "typified",
+    "ipa": "tˈɪpəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "unifying",
+    "ipa": "jˈunəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "unimpaired",
+    "ipa": "ˌʌnɪmpˈɛɹd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "usurping",
+    "ipa": "jusˈɜɹpɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "verified",
+    "ipa": "vˈɛɹəfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "verifying",
+    "ipa": "vˈɛɹəfˌaɪɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "vilified",
+    "ipa": "vˈɪləfˌaɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "wafting",
+    "ipa": "wˈɑftɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "wallabies",
+    "ipa": "wˈɑləbiz",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "wallowing",
+    "ipa": "wˈɑloʊɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "wanting",
+    "ipa": "wˈɑntɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "wearied",
+    "ipa": "wˈɪɹid",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "whitted",
+    "ipa": "wˈɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "withstanding",
+    "ipa": "wɪθstˈændɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "witted",
+    "ipa": "wˈɪtɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "worsted",
+    "ipa": "wˈɜɹstɪd",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "xeroxing",
+    "ipa": "zˈɪɹˌɑksɪŋ",
+    "case_sensitive": false,
+    "enabled": true
+  },
+  {
+    "word": "yeses",
+    "ipa": "jˈɛsɪz",
+    "case_sensitive": false,
+    "enabled": true
+  }
+]

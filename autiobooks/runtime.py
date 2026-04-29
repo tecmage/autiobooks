@@ -143,48 +143,6 @@ def ensure_ffmpeg(root=None, progress_callback=None):
         root.withdraw()
         root.attributes('-topmost', True)
 
-    def do_download():
-        try:
-            tmp_dir = Path(tempfile.gettempdir()) / 'autiobooks_download'
-            tmp_dir.mkdir(exist_ok=True)
-            zip_path = tmp_dir / 'ffmpeg.zip'
-
-            result = [None]
-
-            def download_prog(downloaded, total):
-                if progress_callback:
-                    progress_callback(downloaded, total)
-
-            try:
-                _download_file(FFMPEG_URL, zip_path, download_prog)
-            except (URLError, OSError) as e:
-                result[0] = f"Download failed: {e}"
-                return result
-
-            extract_to = BIN_DIR
-            extract_to.mkdir(parents=True, exist_ok=True)
-
-            _extract_zip(zip_path, extract_to)
-
-            exe_path = _find_exe_in_dir(extract_to, 'ffmpeg.exe')
-            if exe_path and exe_path.parent != BIN_DIR:
-                for f in exe_path.parent.iterdir():
-                    if f.is_file():
-                        shutil.copy2(f, BIN_DIR / f.name)
-                shutil.rmtree(exe_path.parent)
-
-            try:
-                os.unlink(zip_path)
-            except OSError:
-                pass
-
-            ensure_bin_in_path()
-            result[0] = True
-            return result
-        except Exception as e:
-            result[0] = str(e)
-            return result
-
     def show_download_dialog():
         dialog = tk.Toplevel(root)
         dialog.title("Downloading FFmpeg")

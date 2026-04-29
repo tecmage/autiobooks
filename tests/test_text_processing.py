@@ -7,7 +7,11 @@ from autiobooks.text_processing import (
     expand_roman_numerals,
     clean_special_characters,
     apply_substitutions,
+    apply_phoneme_overrides,
+    apply_acronym_spellout,
+    apply_contextual_overrides,
     normalize_text,
+    _to_misaki_phonemes,
     HETERONYMS,
     FRACTION_REPLACEMENTS,
     HAS_SPACY,
@@ -99,10 +103,18 @@ class TestNormalizeUnicode:
     def test_double_low_9_quote(self):
         assert normalize_unicode("\u201e") == '"'
 
-    # strip_diacritics is called inside normalize_unicode
-    def test_diacritics_stripped(self):
-        result = normalize_unicode("caf\u00e9")
+    # strip_diacritics is called inside normalize_unicode for English only
+    def test_diacritics_stripped_english(self):
+        result = normalize_unicode("caf\u00e9", is_english=True)
         assert result == "cafe"
+
+    def test_diacritics_preserved_non_english(self):
+        result = normalize_unicode("caf\u00e9", is_english=False)
+        assert result == "caf\u00e9"
+
+    def test_spanish_tilde_preserved(self):
+        # a\u00f1o (year) must not become "ano" for Spanish voices
+        assert normalize_unicode("a\u00f1o", is_english=False) == "a\u00f1o"
 
 
 # ---------------------------------------------------------------------------
@@ -271,11 +283,14 @@ class TestExpandRomanNumerals:
 class TestResolveHeteronyms:
     """Tests for resolve_heteronyms(text). Skipped if spaCy is unavailable."""
 
-    def test_heteronyms_dict_contains_read(self):
-        assert "read" in HETERONYMS
-
     def test_heteronyms_dict_contains_lead(self):
         assert "lead" in HETERONYMS
+
+    def test_heteronyms_dict_does_not_contain_read(self):
+        # `read` is handled natively by misaki's POS-aware gold lexicon
+        # (VBD/VBN/VBP/ADJ → /ɹɛd/, DEFAULT → /ɹid/); the legacy respelling
+        # would mis-pronounce past-tense cases that spaCy tags VBP.
+        assert "read" not in HETERONYMS
 
     def test_heteronyms_dict_does_not_contain_wind(self):
         assert "wind" not in HETERONYMS
@@ -289,15 +304,8 @@ class TestResolveHeteronyms:
     @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
     def test_resolve_returns_string(self):
         from autiobooks.text_processing import resolve_heteronyms
-        result = resolve_heteronyms("I read a book yesterday.")
+        result = resolve_heteronyms("She will lead the team.")
         assert isinstance(result, str)
-
-    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
-    def test_resolve_present_read(self):
-        from autiobooks.text_processing import resolve_heteronyms
-        result = resolve_heteronyms("I read books every day.")
-        # Present tense "read" should become "reed"
-        assert "reed" in result
 
     @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
     def test_resolve_without_spacy_passthrough(self):
@@ -305,6 +313,182 @@ class TestResolveHeteronyms:
         from autiobooks.text_processing import resolve_heteronyms
         result = resolve_heteronyms("Hello world")
         assert result == "Hello world"
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_lead_present_tense_respelled_to_leed(self):
+        # Non-VBD/VBN tags fall to the 'present' branch; 'leed' is a hint
+        # spelling, not a real word — misaki maps it to /lid/ via espeak.
+        from autiobooks.text_processing import resolve_heteronyms
+        result = resolve_heteronyms("She will lead the team.")
+        assert "leed the team" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_non_heteronym_sentence_unchanged(self):
+        from autiobooks.text_processing import resolve_heteronyms
+        sentence = "The dog barked loudly at the mailman."
+        assert resolve_heteronyms(sentence) == sentence
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_lead_inside_markdown_preserved(self):
+        # apply_contextual_overrides may wrap the metal-sense `lead` as
+        # `[lead](/lˈɛd/)` before resolve_heteronyms runs. The bracket
+        # display text must not be mutated. Defensive: current spaCy
+        # tokenization already protects this (the inner `lead` isn't a
+        # standalone token), but the explicit `_is_inside_markdown` guard
+        # in resolve_heteronyms ensures correctness even if tokenization
+        # changes upstream.
+        from autiobooks.text_processing import resolve_heteronyms
+        pre_wrapped = "He was poisoned by [lead](/lˈɛd/) paint."
+        result = resolve_heteronyms(pre_wrapped)
+        assert "[lead](/lˈɛd/)" in result
+        assert "[leed]" not in result
+        assert "[led]" not in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_pipeline_preserves_lead_markdown(self):
+        # End-to-end: contextual override emits markdown, then resolve
+        # respells. The bracket text must survive both passes.
+        from autiobooks.text_processing import (
+            apply_contextual_overrides, resolve_heteronyms)
+        text = "He was poisoned by lead paint."
+        result = resolve_heteronyms(apply_contextual_overrides(text))
+        assert "[lead](/lˈɛd/)" in result
+        assert "[leed]" not in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_multiple_leads_in_one_sentence(self):
+        # Defensive: when multiple `lead` tokens appear, the function
+        # processes each independently in reverse-index order so earlier
+        # replacements don't shift later token offsets. Pins current
+        # behavior so any future loop refactor is caught.
+        from autiobooks.text_processing import resolve_heteronyms
+        result = resolve_heteronyms("They lead the lead miners.")
+        assert isinstance(result, str)
+        assert "miners" in result
+        # Both tokens respelled (verb VBP and adjective JJ both fall to
+        # the 'present' branch). The contextual `_lead_rule` is a separate
+        # pass that wraps material-sense lead before this function runs;
+        # this test exercises resolve_heteronyms in isolation.
+        assert result.count("leed") == 2
+
+
+# ---------------------------------------------------------------------------
+# 6a. _to_misaki_phonemes — diphthong folding for Kokoro's vocab
+# ---------------------------------------------------------------------------
+
+class TestToMisakiPhonemes:
+    """Kokoro's phoneme vocab maps the five English diphthongs to single
+    letters (A=eɪ, I=aɪ, O=oʊ, W=aʊ, Y=ɔɪ) plus Q=əʊ for GB. Anything we hand
+    Kokoro has to be folded into that alphabet — sending raw `aʊ` makes the
+    model read it as two unrelated phonemes."""
+
+    def test_aw_diphthong(self):
+        assert _to_misaki_phonemes("bˈaʊd") == "bˈWd"
+
+    def test_ay_diphthong(self):
+        assert _to_misaki_phonemes("maɪˈnut") == "mIˈnut"
+
+    def test_ey_diphthong(self):
+        assert _to_misaki_phonemes("bˈeɪs") == "bˈAs"
+
+    def test_ow_diphthong(self):
+        assert _to_misaki_phonemes("ɡoʊ") == "ɡO"
+
+    def test_oy_diphthong(self):
+        assert _to_misaki_phonemes("bˈɔɪ") == "bˈY"
+
+    def test_gb_eu_diphthong(self):
+        assert _to_misaki_phonemes("ɡəʊ") == "ɡQ"
+
+    def test_idempotent(self):
+        # Running twice must not double-substitute; misaki letters have no
+        # canonical-IPA two-char sequences hiding inside them.
+        once = _to_misaki_phonemes("bˈaʊd maɪˈnut")
+        assert _to_misaki_phonemes(once) == once
+
+    def test_passes_through_monophthongs(self):
+        # Consonants, monophthongs, schwas, stress marks must all survive.
+        assert _to_misaki_phonemes("kənˈtɛnt") == "kənˈtɛnt"
+        assert _to_misaki_phonemes("lˈɛd") == "lˈɛd"
+        assert _to_misaki_phonemes("tˈɪɹɪŋ") == "tˈɪɹɪŋ"
+
+
+# ---------------------------------------------------------------------------
+# 6b. apply_contextual_overrides (requires spaCy)
+# ---------------------------------------------------------------------------
+
+class TestContextualHeteronyms:
+    """Tests for apply_contextual_overrides(text). Emits `[word](/IPA/)`
+    markdown when collocation cues demand a non-default pronunciation that
+    misaki's POS-branching gold can't pick from POS alone."""
+
+    def test_no_spacy_passthrough(self):
+        # Returns input unchanged if spaCy isn't importable; the lazy loader
+        # path returns None when the model isn't installed, also a passthrough.
+        result = apply_contextual_overrides("Hello world")
+        assert isinstance(result, str)
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bow_gesture_triggers_aw(self):
+        # Diphthong /aʊ/ folds to misaki's single-letter `W` — see
+        # _to_misaki_phonemes for why Kokoro requires that alphabet.
+        result = apply_contextual_overrides("She took a bow after the show.")
+        assert "[bow](/bˈW/)" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bow_archery_left_alone(self):
+        result = apply_contextual_overrides("He drew the bow and fired an arrow.")
+        assert "[bow]" not in result
+        assert "bow" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_content_predicate_triggers_schwa(self):
+        result = apply_contextual_overrides("She felt content with her life.")
+        assert "[content](/kənˈtɛnt/)" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_content_noun_left_alone(self):
+        result = apply_contextual_overrides("The book had useful content inside.")
+        assert "[content]" not in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_minute_adjective_triggers_diphthong(self):
+        result = apply_contextual_overrides("Every minute detail was examined.")
+        assert "[minute](/mIˈnut/)" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_minute_time_unit_left_alone(self):
+        result = apply_contextual_overrides("Wait one minute, please.")
+        assert "[minute]" not in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_lead_material_triggers_eh(self):
+        result = apply_contextual_overrides("He was poisoned by lead paint.")
+        assert "[lead](/lˈɛd/)" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_lead_verb_left_alone(self):
+        result = apply_contextual_overrides("She will lead the team.")
+        assert "[lead]" not in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bass_instrument_triggers_ey(self):
+        result = apply_contextual_overrides("He plays the bass in a jazz band.")
+        assert "[bass](/bˈAs/)" in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bass_fish_left_alone(self):
+        result = apply_contextual_overrides("The bass swam near the dock.")
+        assert "[bass]" not in result
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_skips_already_wrapped_tokens(self):
+        # Text pre-wrapped by phoneme_overrides or a prior pass: contextual
+        # rule must not double-wrap.
+        result = apply_contextual_overrides(
+            "She felt [content](/kˈɑntɛnt/) with her life."
+        )
+        assert result.count("[content]") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +641,36 @@ class TestApplySubstitutions:
         result = apply_substitutions("alpha and beta", subs)
         assert result == "one and two"
 
+    def test_replace_with_backref_is_literal(self):
+        subs = [{"find": "foo", "replace": r"\1"}]
+        # Without the lambda guard, re.sub would raise re.error ("invalid
+        # group reference 1") because the pattern has no capturing group.
+        result = apply_substitutions("I have foo here", subs)
+        assert result == r"I have \1 here"
+
+    def test_replace_with_named_backref_is_literal(self):
+        subs = [{"find": "foo", "replace": r"\g<0>"}]
+        result = apply_substitutions("foo", subs)
+        assert result == r"\g<0>"
+
+    def test_replace_with_double_backslash_is_literal(self):
+        subs = [{"find": "foo", "replace": r"a\b"}]
+        result = apply_substitutions("foo", subs)
+        # Without the fix, "\b" would be interpreted as a backslash escape.
+        assert result == r"a\b"
+
+    def test_find_with_regex_metachars_is_literal(self):
+        # The "." in the find string must match literally, not any char.
+        subs = [{"find": "a.b", "replace": "X"}]
+        result = apply_substitutions("aXb and a.b", subs, )
+        # "aXb" should stay because the pattern is a literal "a.b"
+        assert result == "aXb and X"
+
+    def test_find_with_parens_is_literal(self):
+        subs = [{"find": "(group)", "replace": "X", "whole_word": False}]
+        result = apply_substitutions("before (group) after", subs)
+        assert result == "before X after"
+
 
 # ---------------------------------------------------------------------------
 # 9. normalize_text (full pipeline)
@@ -527,3 +741,357 @@ class TestNormalizeText:
         text = "pages 10\u201320"
         result = normalize_text(text, lang="fr-fr")
         assert "to" not in result
+
+
+# ---------------------------------------------------------------------------
+# 10. apply_phoneme_overrides
+# ---------------------------------------------------------------------------
+
+class TestPhonemeOverrides:
+    """Tests for apply_phoneme_overrides(text, overrides)."""
+
+    def test_wraps_word(self):
+        # User enters canonical IPA from a dictionary; the override layer
+        # folds the diphthong /aɪ/ to misaki's `I` so Kokoro reads it as a
+        # single phoneme rather than `a`+`ʊ` separately.
+        overrides = [{"word": "Hermione", "ipa": "hɜˈmaɪəni"}]
+        result = apply_phoneme_overrides("Hermione went home", overrides)
+        assert result == "[Hermione](/hɜˈmIəni/) went home"
+
+    def test_case_insensitive_default(self):
+        overrides = [{"word": "Hermione", "ipa": "X"}]
+        result = apply_phoneme_overrides("hermione went", overrides)
+        assert result == "[hermione](/X/) went"
+
+    def test_case_sensitive(self):
+        overrides = [{"word": "Hermione", "ipa": "X", "case_sensitive": True}]
+        result = apply_phoneme_overrides("hermione and Hermione", overrides)
+        assert result == "hermione and [Hermione](/X/)"
+
+    def test_preserves_matched_case(self):
+        overrides = [{"word": "Foo", "ipa": "X"}]
+        result = apply_phoneme_overrides("Foo foo FOO", overrides)
+        assert "[Foo](/X/)" in result
+        assert "[foo](/X/)" in result
+        assert "[FOO](/X/)" in result
+
+    def test_regex_metachars_escaped(self):
+        overrides = [{"word": "foo.bar", "ipa": "X"}]
+        # Literal dot — "fooXbar" must NOT match.
+        result = apply_phoneme_overrides(
+            "got foo.bar here but fooXbar stays", overrides)
+        assert result == "got [foo.bar](/X/) here but fooXbar stays"
+
+    def test_backref_ipa_is_literal(self):
+        overrides = [{"word": "foo", "ipa": r"\1"}]
+        result = apply_phoneme_overrides("foo here", overrides)
+        assert result == r"[foo](/\1/) here"
+
+    def test_named_backref_ipa_is_literal(self):
+        overrides = [{"word": "foo", "ipa": r"\g<0>"}]
+        result = apply_phoneme_overrides("foo here", overrides)
+        assert result == r"[foo](/\g<0>/) here"
+
+    def test_apostrophe_word_matches(self):
+        overrides = [{"word": "O'Brien", "ipa": "X"}]
+        result = apply_phoneme_overrides("O'Brien nodded", overrides)
+        assert result == "[O'Brien](/X/) nodded"
+
+    def test_hyphenated_word_matches(self):
+        overrides = [{"word": "Anne-Marie", "ipa": "X"}]
+        result = apply_phoneme_overrides("Anne-Marie arrived", overrides)
+        assert result == "[Anne-Marie](/X/) arrived"
+
+    def test_disabled_entry_skipped(self):
+        overrides = [{"word": "Hermione", "ipa": "X", "enabled": False}]
+        result = apply_phoneme_overrides("Hermione went", overrides)
+        assert result == "Hermione went"
+
+    def test_empty_word_skipped(self):
+        overrides = [{"word": "", "ipa": "X"}]
+        result = apply_phoneme_overrides("foo bar", overrides)
+        assert result == "foo bar"
+
+    def test_empty_ipa_skipped(self):
+        overrides = [{"word": "foo", "ipa": ""}]
+        result = apply_phoneme_overrides("foo bar", overrides)
+        assert result == "foo bar"
+
+    def test_empty_overrides_list(self):
+        assert apply_phoneme_overrides("text", []) == "text"
+        assert apply_phoneme_overrides("text", None) == "text"
+
+    def test_word_boundary_not_partial(self):
+        overrides = [{"word": "her", "ipa": "X"}]
+        # "Hermione" should NOT match — \b makes "her" whole-word.
+        result = apply_phoneme_overrides("Hermione and her", overrides)
+        assert "[Hermione](/X/)" not in result
+        assert "[her](/X/)" in result
+
+    def test_multiple_overrides(self):
+        overrides = [
+            {"word": "Hermione", "ipa": "H"},
+            {"word": "Ron", "ipa": "R"},
+        ]
+        result = apply_phoneme_overrides("Hermione and Ron", overrides)
+        assert result == "[Hermione](/H/) and [Ron](/R/)"
+
+
+# ---------------------------------------------------------------------------
+# 11. apply_acronym_spellout
+# ---------------------------------------------------------------------------
+
+class TestAcronymSpellout:
+    """Tests for apply_acronym_spellout(text, enabled)."""
+
+    def test_basic(self):
+        assert apply_acronym_spellout("The CIA", enabled=True) == "The C. I. A."
+
+    def test_multiple(self):
+        assert (apply_acronym_spellout("CIA and FBI", enabled=True)
+                == "C. I. A. and F. B. I.")
+
+    def test_disabled_default_is_no_op(self):
+        assert apply_acronym_spellout("The CIA", enabled=False) == "The CIA"
+
+    def test_skips_gold_entries(self):
+        # NATO/NASA/SQL are in misaki gold with specific pronunciations.
+        out = apply_acronym_spellout(
+            "NATO met with NASA and SQL", enabled=True)
+        assert "NATO" in out and "NASA" in out and "SQL" in out
+        assert "N. A. T. O." not in out
+
+    def test_skips_roman_numerals(self):
+        # II, III, IV, V, X etc. are in the hard stoplist.
+        out = apply_acronym_spellout("Section IV and Part VII", enabled=True)
+        assert "IV" in out and "VII" in out
+        assert "I. V." not in out
+
+    def test_ignores_mixed_case(self):
+        out = apply_acronym_spellout("The Cia called iPad", enabled=True)
+        assert out == "The Cia called iPad"
+
+    def test_ignores_single_letter(self):
+        # Single-letter all-caps ("A", "I") is below the 2-char minimum.
+        out = apply_acronym_spellout("I went to A meeting", enabled=True)
+        assert out == "I went to A meeting"
+
+    def test_length_cap(self):
+        # 7+ chars are past the regex ceiling — let them pass through.
+        out = apply_acronym_spellout("ABCDEFGH", enabled=True)
+        assert out == "ABCDEFGH"
+
+    def test_word_boundary(self):
+        # Substring "CIA" inside another uppercase token shouldn't match.
+        out = apply_acronym_spellout("SOMETHINGCIA", enabled=True)
+        # SOMETHINGCIA is 12 chars — past the cap — so untouched.
+        assert out == "SOMETHINGCIA"
+
+    def test_skips_pronounceable_extras(self):
+        # misaki gold stores SCUBA/LASER/RADAR/SONAR/SWAT/TASER/MODEM/WASP/
+        # CAPTCHA/GULAG only in lowercase; the ALL-CAPS skip-filter would
+        # miss them without _ACRONYM_EXTRA_SKIP.
+        pronounceable = [
+            "SCUBA", "LASER", "RADAR", "SONAR", "SWAT",
+            "TASER", "MODEM", "WASP", "CAPTCHA", "GULAG",
+        ]
+        for word in pronounceable:
+            sentence = f"The {word} was used."
+            out = apply_acronym_spellout(sentence, enabled=True)
+            assert word in out, f"{word} should not be spelled"
+            assert ". ".join(word) + "." not in out
+
+
+# ---------------------------------------------------------------------------
+# 12. normalize_text — interaction of new passes with the rest
+# ---------------------------------------------------------------------------
+
+class TestNormalizePronunciationPipeline:
+    """End-to-end interactions between substitutions / acronym / override."""
+
+    def test_overrides_applied(self):
+        out = normalize_text(
+            "Hermione nodded.", lang="en-us",
+            phoneme_overrides=[{"word": "Hermione", "ipa": "hɜˈmaɪəni"}])
+        assert "[Hermione](/hɜˈmIəni/)" in out
+
+    def test_overrides_skipped_for_non_english(self):
+        out = normalize_text(
+            "Hermione nodded.", lang="fr-fr",
+            phoneme_overrides=[{"word": "Hermione", "ipa": "X"}])
+        assert "[Hermione]" not in out
+
+    def test_auto_acronyms_runs_for_english(self):
+        out = normalize_text(
+            "The CIA arrived.", lang="en-us", auto_acronyms=True)
+        assert "C. I. A." in out
+
+    def test_auto_acronyms_skipped_for_non_english(self):
+        out = normalize_text(
+            "The CIA arrived.", lang="de-de", auto_acronyms=True)
+        assert "CIA" in out
+        assert "C. I. A." not in out
+
+    def test_substitutions_run_before_acronym(self):
+        # User rewrites CIA to a full phrase — auto-acronym should not fire
+        # on the expanded text.
+        subs = [{"find": "CIA", "replace": "Central Intelligence Agency",
+                 "whole_word": True, "case_sensitive": True}]
+        out = normalize_text(
+            "The CIA arrived.", lang="en-us",
+            substitutions=subs, auto_acronyms=True)
+        assert "Central Intelligence Agency" in out
+        assert "C. I. A." not in out
+
+    def test_substitutions_chain_into_override(self):
+        # "Dr." -> "Doctor" via substitution, then override "Doctor" phonemes.
+        subs = [{"find": "Dr.", "replace": "Doctor", "whole_word": False}]
+        overrides = [{"word": "Doctor", "ipa": "ˈdɑktɚ"}]
+        out = normalize_text(
+            "Dr. Smith arrived.", lang="en-us",
+            substitutions=subs,
+            phoneme_overrides=overrides)
+        assert "[Doctor](/ˈdɑktɚ/)" in out
+
+    def test_clean_special_characters_preserves_override_syntax(self):
+        # Direct check that brackets/slashes survive the special-char cleanup
+        # — guards against regressions if the scene-break regex ever widens.
+        text = "Hello [Hermione](/hɜˈmaɪəni/) goodbye"
+        out = clean_special_characters(text, is_english=True)
+        assert "[Hermione](/hɜˈmaɪəni/)" in out
+
+    def test_backref_in_override_ipa_literal(self):
+        # Same class of bug we fixed in apply_substitutions — the IPA
+        # template must not be interpreted as a regex replacement.
+        overrides = [{"word": "foo", "ipa": r"\g<0>"}]
+        out = normalize_text("foo here", lang="en-us",
+                             phoneme_overrides=overrides)
+        assert r"[foo](/\g<0>/)" in out
+
+
+# ---------------------------------------------------------------------------
+# 13. Misaki preprocess whitespace patch — multi-paragraph alignment
+# ---------------------------------------------------------------------------
+#
+# Upstream misaki.en.G2P.preprocess builds its source-token list with
+# str.split(), which silently drops every whitespace run. spaCy's tokenizer
+# keeps `\n` (and other whitespace) as separate tokens, so on long text the
+# source list is shorter than the spaCy mutable-token list and
+# Alignment.from_strings drifts further with every paragraph break. By the
+# time a `[word](/IPA/)` markdown wrapping appears mid-chapter, its feature
+# attaches to a punctuation/newline mutable_token instead of the actual word
+# — the rating-5 IPA gets dropped silently and the override audio leaks onto
+# the wrong token. autiobooks/engine.py:_patch_misaki_preprocess() monkey-
+# patches the system misaki at import time; autiobooks/misaki/en.py carries
+# the same fix in-place for PyInstaller builds.
+
+class TestMisakiPreprocessWhitespacePatch:
+    """Regression: the alignment-drift bug that hid `[word](/IPA/)` markdown
+    overrides mid-chapter. Tests must run against multi-paragraph text — the
+    bug is invisible on single-sentence inputs because there isn't enough
+    accumulated drift for the wrong-token attachment to occur."""
+
+    def test_bundled_preprocess_keeps_whitespace_tokens(self):
+        from autiobooks.misaki import en as bundled_en
+        text = "First paragraph.\nSecond paragraph.\n[word](/wˈɜɹd/) here."
+        _result, tokens, _features = bundled_en.G2P.preprocess(text)
+        whitespace_tokens = [t for t in tokens if t and not t.strip()]
+        # Without the patch, str.split() yields zero whitespace tokens for
+        # this input; with the patch the two `\n` runs are preserved.
+        assert len(whitespace_tokens) >= 2, (
+            f"expected ≥2 whitespace source tokens, got {whitespace_tokens!r}")
+
+    def test_engine_import_patches_system_misaki(self):
+        # Importing autiobooks.engine must install the monkey-patch on the
+        # `misaki` package Kokoro pulls in at runtime — otherwise the runtime
+        # path stays broken even when the bundled copy is fixed.
+        from autiobooks import engine  # noqa: F401  (import for side effect)
+        from misaki import en as system_en
+        assert getattr(
+            system_en.G2P.preprocess, '_autiobooks_ws_patch', False), (
+            "system misaki.en.G2P.preprocess was not patched on engine import")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_markdown_override_survives_chapter_length_text(self):
+        # Reproduces the Sky_Pride_Ch39 bug: a single `[bowed](/bˈWd/)`
+        # wrapping placed deep in multi-paragraph text. Pre-patch, the
+        # feature attached to a `?` or `\n` mutable_token and the bowed
+        # token fell back to misaki's gold (`bˈOd`).
+        from autiobooks import engine  # noqa: F401
+        from autiobooks.misaki import en as bundled_en
+        prelude = "\n".join([
+            "She entered the courtyard. He waited at the gate.",
+            "Cherry petals drifted across the stones.",
+            "The wind carried whispers of the past.",
+            "Daoist Steelshimmer was looking at him like she had "
+            "discovered a treasure. \"Junior, what are you?\"",
+            "That didn't seem like it had a good answer.",
+            "She was waiting for him to say something.",
+            "",
+        ])
+        text = prelude + 'He [bowed](/bˈWd/).'
+        g2p = bundled_en.G2P(trf=False, british=False, fallback=None)
+        _result, tokens = g2p(text)
+        bowed = [t for t in tokens if (t.text or '').lower() == 'bowed']
+        assert len(bowed) == 1
+        assert bowed[0].phonemes == 'bˈWd', (
+            f"alignment drift attached IPA to wrong token; "
+            f"bowed phonemes={bowed[0].phonemes!r} (expected 'bˈWd')")
+        assert bowed[0]._.rating == 5
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_multiple_markdowns_each_hit_their_target(self):
+        # Three wrappings spread across a chapter-shaped block. Pre-patch,
+        # the second and third would drift further than the first and miss
+        # entirely — every override after the first paragraph break was at
+        # risk.
+        from autiobooks import engine  # noqa: F401
+        from autiobooks.misaki import en as bundled_en
+        para = ("This is a paragraph that runs across several sentences. "
+                "It contains punctuation, dialogue, and quote marks. "
+                "\"It even has a quoted line,\" she said.\n")
+        text = (para + 'He [bowed](/bˈWd/) deeply.\n' +
+                para + 'She [bowed](/bˈWd/) again.\n' +
+                para + 'They [bowed](/bˈWd/) too.\n')
+        g2p = bundled_en.G2P(trf=False, british=False, fallback=None)
+        _result, tokens = g2p(text)
+        bowed = [t for t in tokens if (t.text or '').lower() == 'bowed']
+        assert len(bowed) == 3
+        for i, t in enumerate(bowed):
+            assert t.phonemes == 'bˈWd', (
+                f"bowed[{i}] missed alignment: phonemes={t.phonemes!r}")
+            assert t._.rating == 5
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_user_override_survives_long_text(self):
+        # Same bug also broke user-entered Pronunciation Overrides on long
+        # chapters — the test surface needs to cover both contextual rules
+        # and user overrides since both ride the same markdown channel.
+        from autiobooks import engine  # noqa: F401
+        from autiobooks.misaki import en as bundled_en
+        prelude = "\n".join([f"Filler paragraph number {i}." for i in range(8)])
+        text = prelude + "\nThe person we met was [Hermione](/hɜˈmIəni/)."
+        g2p = bundled_en.G2P(trf=False, british=False, fallback=None)
+        _result, tokens = g2p(text)
+        hits = [t for t in tokens if (t.text or '').lower() == 'hermione']
+        assert len(hits) == 1
+        assert hits[0].phonemes == 'hɜˈmIəni'
+        assert hits[0]._.rating == 5
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_no_ipa_leakage_to_neighbours(self):
+        # Pre-patch, the dropped feature got attached to whatever token the
+        # alignment landed on (usually a punctuation mark). That token then
+        # spoke the override phonemes — the audible "baud" leaking onto a
+        # `?` or newline. Verify no non-target token receives our IPA.
+        from autiobooks import engine  # noqa: F401
+        from autiobooks.misaki import en as bundled_en
+        prelude = "\n".join([f"Paragraph {i} adds enough length." for i in range(6)])
+        text = prelude + '\nFinally, he [bowed](/bˈWd/) once.'
+        g2p = bundled_en.G2P(trf=False, british=False, fallback=None)
+        _result, tokens = g2p(text)
+        for t in tokens:
+            if (t.text or '').lower() == 'bowed':
+                continue
+            assert t.phonemes != 'bˈWd', (
+                f"IPA leaked onto non-target token text={t.text!r}")

@@ -519,14 +519,24 @@ class G2P:
 
     @staticmethod
     def preprocess(text):
+        # PATCH: upstream misaki uses str.split() here, which drops every
+        # whitespace run. spaCy's tokenizer keeps `\n` and other whitespace
+        # as their own tokens, so the source-token list ends up shorter than
+        # the spaCy one and Alignment.from_strings drifts further with every
+        # paragraph break. By the time a markdown wrapping appears in a long
+        # chapter, the feature attaches to a punctuation/newline mutable_token
+        # and the actual word falls back to gold. Keeping whitespace runs as
+        # source tokens makes the two token streams alignable end-to-end.
         result = ''
         tokens = []
         features = {}
         last_end = 0
         text = text.lstrip()
+        def _split_keep_ws(s):
+            return [t for t in re.split(r'(\s+)', s) if t]
         for m in LINK_REGEX.finditer(text):
             result += text[last_end:m.start()]
-            tokens.extend(text[last_end:m.start()].split())
+            tokens.extend(_split_keep_ws(text[last_end:m.start()]))
             f = m.group(2)
             if is_digit(f[1 if f[:1] in ('-', '+') else 0:]):
                 f = int(f)
@@ -547,7 +557,7 @@ class G2P:
             last_end = m.end()
         if last_end < len(text):
             result += text[last_end:]
-            tokens.extend(text[last_end:].split())
+            tokens.extend(_split_keep_ws(text[last_end:]))
         return result, tokens, features
 
     def tokenize(self, text: str, tokens, features) -> List[MToken]:

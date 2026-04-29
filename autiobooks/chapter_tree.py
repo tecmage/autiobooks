@@ -36,18 +36,20 @@ class ChapterTreeView:
 
     def __init__(self, parent, book, chapters, metadata, *,
                  on_selection_change=None, auto_select=True,
-                 mark_duplicates=True):
+                 mark_duplicates=True, on_play_preview=None):
         self._init_checkbox_images()
         self.parent = parent
         self.book = book
         self.chapters = chapters
         self.metadata = metadata
         self.on_selection_change = on_selection_change
+        self.on_play_preview = on_play_preview
 
         self._item_to_chapter = {}
         self._chapter_to_item = {}
-        self._content_hashes = set()
         self._selected = set()
+        self._selected_preview_chapter = None
+        self.play_button = None
 
         self._build_ui()
         self._build_tree()
@@ -74,6 +76,11 @@ class ChapterTreeView:
                    command=self.expand_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text='Collapse All',
                    command=self.collapse_all).pack(side=tk.LEFT, padx=2)
+        if self.on_play_preview is not None:
+            self.play_button = ttk.Button(
+                toolbar, text='▶️',
+                command=self._on_play_preview_click, state='disabled')
+            self.play_button.pack(side=tk.LEFT, padx=2)
 
         tree_frame = ttk.Frame(left)
         tree_frame.pack(fill=tk.BOTH, expand=True)
@@ -152,9 +159,17 @@ class ChapterTreeView:
                     if id(ch) not in self._chapter_to_item:
                         self._insert_chapter_node(ch, toc_title, parent_iid)
                 else:
-                    for ch in self.chapters:
-                        if id(ch) not in self._chapter_to_item:
-                            if fname and fname in ch.file_name:
+                    # Fallback: TOC href and chapter file_name may have
+                    # different path prefixes (OEBPS/, text/, etc.). Match
+                    # on the bare basename, but only with == — substring
+                    # matching falsely conflates ch01.xhtml with ch010.xhtml.
+                    target_base = fname.rsplit('/', 1)[-1] if fname else ''
+                    if target_base:
+                        for ch in self.chapters:
+                            if id(ch) in self._chapter_to_item:
+                                continue
+                            ch_base = ch.file_name.rsplit('/', 1)[-1]
+                            if ch_base == target_base:
                                 self._insert_chapter_node(
                                     ch, toc_title, parent_iid)
                                 break
@@ -170,39 +185,31 @@ class ChapterTreeView:
                          or chapter.file_name)
         word_count = len(chapter.extracted_text.split())
         is_empty = not chapter.extracted_text.strip()
-        content_hash = _content_hash(chapter.extracted_text)
-        is_duplicate = content_hash in self._content_hashes
-        self._content_hashes.add(content_hash)
-
-        suffix = ''
-        if is_duplicate:
-            suffix = ' (Duplicate)'
 
         iid = self.tree.insert(
             parent_iid, 'end',
-            text=f'{display_title}{suffix}',
+            text=display_title,
             image=self._checkbox_images['unchecked'],
             values=('chapter', str(id(chapter)), str(word_count),
-                    str(is_empty), str(is_duplicate)))
+                    str(is_empty), 'False'))
         self._item_to_chapter[iid] = chapter
         self._chapter_to_item[id(chapter)] = iid
 
     # ── Duplicate detection ────────────────────────────────────────────
 
     def _detect_duplicates(self):
-        seen = {}
+        seen = set()
         for iid, ch in self._item_to_chapter.items():
             h = _content_hash(ch.extracted_text)
             if h in seen:
                 title = self.tree.item(iid, 'text')
-                if '(Duplicate)' not in title:
-                    self.tree.item(iid, text=f'{title} (Duplicate)')
-                    vals = list(self.tree.item(iid, 'values'))
-                    if len(vals) > 4:
-                        vals[4] = 'True'
+                self.tree.item(iid, text=f'{title} (Duplicate)')
+                vals = list(self.tree.item(iid, 'values'))
+                if len(vals) > 4:
+                    vals[4] = 'True'
                     self.tree.item(iid, values=vals)
             else:
-                seen[h] = iid
+                seen.add(h)
 
     # ── Auto-select ────────────────────────────────────────────────────
 
@@ -336,6 +343,16 @@ class ChapterTreeView:
             self.preview_text.delete('1.0', tk.END)
             self.preview_text.insert('1.0', f'Section: {title}')
             self.preview_info_label.config(text='')
+            self._selected_preview_chapter = None
+            if self.play_button is not None:
+                self.play_button.configure(state='disabled')
+
+    def _on_play_preview_click(self):
+        if self._selected_preview_chapter is None:
+            return
+        if self.on_play_preview is None or self.play_button is None:
+            return
+        self.on_play_preview(self._selected_preview_chapter, self.play_button)
 
     def _show_chapter_preview(self, chapter):
         text = chapter.extracted_text
@@ -345,6 +362,9 @@ class ChapterTreeView:
         self.preview_text.insert('1.0', text)
         word_str = 'word' if word_count == 1 else 'words'
         self.preview_info_label.config(text=f'{word_count:,} {word_str}')
+        self._selected_preview_chapter = chapter
+        if self.play_button is not None:
+            self.play_button.configure(state='normal')
 
     def _show_book_info(self):
         md = self.metadata
@@ -365,6 +385,9 @@ class ChapterTreeView:
         self.preview_text.insert(
             '1.0', '\n'.join(lines) if lines else 'No metadata available')
         self.preview_info_label.config(text='Book Info')
+        self._selected_preview_chapter = None
+        if self.play_button is not None:
+            self.play_button.configure(state='disabled')
 
     # ── Public API ─────────────────────────────────────────────────────
 
