@@ -16,7 +16,7 @@ PRs are welcome!
 ## Features
 
 - **High-quality TTS** — powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M), an 82M parameter open-weight model
-- **Multiple voices** — 56 voices across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin)
+- **Multiple voices** — 54 voices across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin)
 - **CLI mode** — headless conversion for scripting and automation (`python -m autiobooks convert book.epub`)
 - **Hierarchical chapter tree** — browse chapters in a tree view that follows the epub's table of contents structure, with checkboxes, parent-child propagation, auto-select, duplicate detection, and a full-text preview panel
 - **PDF support** — open PDF files directly (pypdf, bundled as a required dependency)
@@ -81,7 +81,7 @@ PRs are welcome!
 
 **New features:**
 - **CLI mode** — headless conversion for scripting and automation: `python -m autiobooks convert book.epub -o book.m4b --voice af_heart`; also `list-chapters` and `list-voices` subcommands; auto-selects non-empty non-duplicate chapters; supports resume, ETA display, and all format/quality options
-- **Multi-language voices** — all 56 Kokoro voices now available across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin); text normalization automatically skips English-specific steps for non-English voices
+- **Multi-language voices** — all 54 Kokoro voices now available across 9 languages: English (US/GB), Spanish, French, Hindi, Italian, Japanese, Portuguese (BR), and Chinese (Mandarin); text normalization automatically skips English-specific steps for non-English voices
 
 **Dependency upgrades:**
 - **Kokoro 0.9.4** — upgraded from 0.7.9; scipy dependency removed (smaller install), numpy unpinned, MPS (macOS GPU) support added
