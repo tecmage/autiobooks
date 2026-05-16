@@ -30,6 +30,19 @@ BLOCK_TAGS = {
 # Class names that indicate footnote/endnote references
 FOOTNOTE_CLASSES = {'noteref', 'footnote-ref', 'endnote-ref', 'fn-ref'}
 
+# Filename stems (basename minus extension, lowercased) for non-content
+# documents that get spuriously listed as chapters — covers, title pages,
+# colophons, etc. The book's actual cover image is rendered separately;
+# the title page mostly carries duplicate metadata.
+_EXCLUDED_FILE_STEMS = {
+    'cover', 'titlepage', 'title_page', 'title-page',
+}
+
+# TOC labels (lowercased, stripped) that mark non-content entries.
+_EXCLUDED_TOC_TITLES = {
+    'cover', 'cover page', 'title page', 'titlepage',
+}
+
 
 def _is_footnote_ref(tag):
     """Detect footnote/endnote reference links that clutter TTS output."""
@@ -147,12 +160,27 @@ def _get_chapter_html(chapter):
             return None
 
 
+def _is_excluded_chapter(chapter, toc_titles):
+    """Skip cover/title-page documents that aren't real chapters."""
+    basename = chapter.file_name.rsplit('/', 1)[-1].lower()
+    stem = basename.rsplit('.', 1)[0] if '.' in basename else basename
+    if stem in _EXCLUDED_FILE_STEMS:
+        return True
+    toc_title = (toc_titles.get(chapter.file_name) or '').strip().lower()
+    if toc_title in _EXCLUDED_TOC_TITLES:
+        return True
+    return False
+
+
 def find_document_chapters_and_extract_texts(book):
     """Returns every chapter that is an ITEM_DOCUMENT
     and enriches each chapter with extracted_text."""
+    toc_titles = _build_toc_map(book.toc) if getattr(book, 'toc', None) else {}
     document_chapters = []
     for chapter in book.get_items():
         if not is_valid_chapter(chapter):
+            continue
+        if _is_excluded_chapter(chapter, toc_titles):
             continue
         xml = _get_chapter_html(chapter)
         if xml is None:

@@ -15,7 +15,7 @@ from pathlib import Path
 from kokoro import KPipeline
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from .text_processing import normalize_text
-from .voices_lang import get_language_from_voice
+from .voices_lang import get_language_from_voice, resolve_voice
 
 
 def _patch_misaki_preprocess():
@@ -281,10 +281,11 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
                        on_segment=None):
     # a for american or b for british etc.
     pipeline = get_pipeline(voice[0])
+    voice_arg = resolve_voice(voice)
     audio_segments = []
     speed = float(speed)
     with torch.inference_mode():
-        for gs, ps, audio in pipeline(text, voice=voice, speed=speed,
+        for gs, ps, audio in pipeline(text, voice=voice_arg, speed=speed,
                                       split_pattern=split_pattern):
             audio_segments.append(audio)
             if on_segment:

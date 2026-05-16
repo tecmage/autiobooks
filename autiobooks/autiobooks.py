@@ -39,6 +39,7 @@ import numpy as np
 import shutil
 import tempfile
 import os
+from . import voices_lang
 from .voices_lang import voices, voices_emojified, deemojify_voice, get_language_from_voice
 
 PREVIEW_FILE = os.path.join(tempfile.gettempdir(), "autiobooks_preview.wav")
@@ -206,6 +207,20 @@ def start_gui():
     voice_combo.set(voices_emojified[0])
     voice_combo.pack(side=tk.LEFT, pady=5, padx=5)
 
+    def refresh_voice_dropdown(*_):
+        """Re-scan ~/.autiobooks/voices/ so newly-dropped .pt files appear
+        without needing a restart. Triggered on dropdown click and after
+        opening the voices folder via the Tools menu."""
+        current = voice_combo.get()
+        voices_lang.refresh_voices()
+        voice_combo.configure(values=voices_lang.voices_emojified)
+        if current in voices_lang.voices_emojified:
+            voice_combo.set(current)
+        elif voices_lang.voices_emojified:
+            voice_combo.set(voices_lang.voices_emojified[0])
+
+    voice_combo.bind('<Button-1>', refresh_voice_dropdown)
+
     speed_label = tk.Label(settings_row1, text="Reading speed:")
     speed_label.pack(side=tk.LEFT, pady=5, padx=15)
 
@@ -364,6 +379,29 @@ def start_gui():
         _show_phoneme_overrides_dialog_impl(
             root, phoneme_overrides, on_save)
 
+    def open_voices_folder():
+        voices_dir = voices_lang.get_voices_dir()
+        try:
+            voices_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            messagebox.showerror(
+                "Voices Folder",
+                f"Could not create voices folder:\n{voices_dir}\n\n{e}")
+            return
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(str(voices_dir))
+            elif platform.system() == 'Darwin':
+                _subprocess.Popen(['open', str(voices_dir)])
+            else:
+                _subprocess.Popen(['xdg-open', str(voices_dir)])
+        except OSError as e:
+            messagebox.showerror(
+                "Voices Folder",
+                f"Could not open voices folder:\n{voices_dir}\n\n{e}")
+            return
+        refresh_voice_dropdown()
+
     menubar = tk.Menu(root)
     tools_menu = tk.Menu(menubar, tearoff=0)
     tools_menu.add_command(label='Append M4B files...', command=show_append_dialog)
@@ -372,6 +410,8 @@ def start_gui():
                            command=show_substitutions_dialog)
     tools_menu.add_command(label='Pronunciation Overrides...',
                            command=show_phoneme_overrides_dialog)
+    tools_menu.add_command(label='Open Voices Folder...',
+                           command=open_voices_folder)
     if platform.system() == "Windows":
         from .runtime import check_nvidia_gpu
         if check_nvidia_gpu():

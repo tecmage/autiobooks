@@ -211,6 +211,24 @@ CASES = [
     ('rebel',       'The teenagers will rebel against any rule.',  'ɹəbˈɛl'),
     ('reject',      'They marked it as a reject.',                 'ɹˈidʒɛkt'),
     ('reject',      'The company will reject the offer.',          'ɹədʒˈɛkt'),
+
+    # 'breathed' — misaki US gold has the wrong entry (/bɹˈɛθt/, treating it
+    # as 'breath' + t). Override emits /bɹˈiðd/ unconditionally.
+    ('breathed',    'She breathed the cold morning air.',          'bɹiðd'),
+    ('breathed',    'He breathed deeply before answering.',        'bɹiðd'),
+    # Regression guard so the new override doesn't bleed into 'breath' itself.
+    ('breath',      'He took a deep breath.',                      'bɹɛθ'),
+
+    # 'teethed' — same bug pattern as 'breathed' in misaki silver
+    # (/tˈiθt/, treats it as 'teeth' + t). Override emits /tˈiðd/.
+    ('teethed',     'The baby teethed early.',                     'tiðd'),
+    ('teethed',     'She teethed late, around fourteen months.',   'tiðd'),
+
+    # Proper-noun gaps in misaki gold/silver — built-in IPA overrides.
+    ('angeles',     'They moved to Los Angeles last year.',        'ˈændʒələs'),
+    ('yosemite',    'We hiked through Yosemite all summer.',       'joʊsˈɛmɪti'),
+    ('sean',        'Sean walked into the room.',                  'ʃɔn'),
+    ('aoife',       'Aoife laughed at the joke.',                  'ifə'),
 ]
 
 

@@ -123,7 +123,10 @@ def _load_book(input_path):
 
 def cmd_list_voices(args):
     """Print all available voices grouped by language."""
-    from .voices_lang import voices_internal, _PREFIX_TO_LANGUAGE
+    from .voices_lang import (
+        voices_internal, _PREFIX_TO_LANGUAGE,
+        discover_custom_voices, get_voices_dir,
+    )
 
     # Build language name mapping
     LANGUAGE_NAMES = {
@@ -152,6 +155,14 @@ def cmd_list_voices(args):
             gender = 'female' if voice[1] == 'f' else 'male'
             name = voice.split('_', 1)[1] if '_' in voice else voice
             print(f"  {voice:<20} ({gender}, {name})")
+
+    custom = discover_custom_voices()
+    if custom:
+        print(f"\nCustom (from {get_voices_dir()}):")
+        for voice in custom:
+            lang_code = _PREFIX_TO_LANGUAGE.get(voice[0], 'unknown')
+            lang_name = LANGUAGE_NAMES.get(lang_code, lang_code)
+            print(f"  {voice:<20} ({lang_name})")
 
 
 def cmd_list_chapters(args):
@@ -216,9 +227,9 @@ def cmd_convert(args):
         output_path = str(Path(input_path).with_suffix(ext))
 
     # Validate voice
-    from .voices_lang import voices_internal
+    from .voices_lang import voices_internal, discover_custom_voices
     voice = args.voice
-    if voice not in voices_internal:
+    if voice not in voices_internal and voice not in discover_custom_voices():
         _eprint(f"Error: Unknown voice '{voice}'.")
         _eprint(f"Use 'list-voices' to see available voices.")
         sys.exit(1)

@@ -260,6 +260,24 @@ def _lead_rule(token, doc):
     return None
 
 
+def _breathed_rule(token, doc):
+    """'breathed' → /bɹˈiðd/. Misaki US gold has 'breathed' as /bɹˈɛθt/
+    (treats it as 'breath' + /t/), but it's the past tense of 'breathe'
+    /bɹˈið/ — voiced /ð/, long /i/. No noun homonym exists, so the
+    override is unconditional. GB gold has no entry for 'breathed' at
+    all; this fills that gap too. Other forms (breathe, breathes,
+    breathing, breather) are already correct in misaki gold/silver."""
+    return 'bɹˈiðd'
+
+
+def _teethed_rule(token, doc):
+    """'teethed' → /tˈiðd/. Same bug pattern as 'breathed': misaki silver
+    (US + GB) has 'teethed' as /tˈiθt/ (treats it as 'teeth' + /t/), but
+    it's the past tense of the verb 'teethe' /tˈið/, voiced /ð/. No noun
+    homonym, so unconditional."""
+    return 'tˈiðd'
+
+
 def _bass_rule(token, doc):
     """'bass' → /beɪs/ when the context cues the musical instrument.
     Fish default (/bæs/) falls through to misaki's gold."""
@@ -316,6 +334,8 @@ _CONTEXTUAL_RULES = {
     'bows': _bow_rule,
     'bowed': _bow_rule,
     'bowing': _bow_rule,
+    'breathed': _breathed_rule,
+    'teethed': _teethed_rule,
     'content': _content_rule,
     'minute': _minute_rule,
     'lead': _lead_rule,
@@ -460,6 +480,22 @@ def strip_diacritics(text):
     return ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
 
 
+# `résumé` (CV/noun) collides with `resume` (verb) after diacritic strip.
+# misaki gold has only the verb pronunciation /ɹəzˈum/, so the noun would
+# otherwise be read as the verb. Detect the accented spelling and wrap as
+# inline IPA markdown BEFORE strip_diacritics so the cue survives. Plain
+# `resume` (no accents) is left alone and keeps misaki's verb default.
+_RESUME_NOUN_RE = re.compile(r'\b([Rr])(?:ésumé|esumé|ésume)(s?)\b')
+
+
+def _wrap_resume_noun(m):
+    initial = m.group(1)
+    plural = m.group(2)
+    ipa = 'ˈɹɛzəmeɪz' if plural else 'ˈɹɛzəmeɪ'
+    ipa = _to_misaki_phonemes(ipa)
+    return f'[{initial}esume{plural}](/{ipa}/)'
+
+
 def normalize_unicode(text, is_english=True):
     for char, replacement in UNICODE_REPLACEMENTS.items():
         text = text.replace(char, replacement)
@@ -474,6 +510,9 @@ def normalize_unicode(text, is_english=True):
     # Remaining en-dashes
     text = text.replace('\u2013', ' - ')
     if is_english:
+        # Preserve accented noun spellings as IPA markdown before the strip
+        # destroys the cue. Must run BEFORE strip_diacritics.
+        text = _RESUME_NOUN_RE.sub(_wrap_resume_noun, text)
         # misaki's English lexicon is ASCII-only; other languages need diacritics for G2P.
         text = strip_diacritics(text)
     return text
@@ -540,13 +579,91 @@ ABBREVIATIONS = {
     'Ch.': 'Chapter',
     'pp.': 'pages',
     'Vol.': 'Volume',
-    'No.': 'Number',
     'Ed.': 'Edition',
     'Fig.': 'Figure',
     'Pt.': 'Part',
-    # Saint (before a name — capital letter follows)
-    'St.': 'Saint',
 }
+
+
+# `St.` needs context to expand: "Main St." is Street; "St. Patrick" is Saint.
+# `_resolve_st_dot` runs AFTER the dict-loop in expand_abbreviations so title
+# abbreviations like `Dr.` → `Doctor` and `Mt.` → `Mount` are already expanded;
+# that lets the title-prefix and place-prefix branches catch chains like
+# "Dr. St. James" → "Doctor Saint James" and "Mt. St. Helens" → "Mount Saint Helens".
+_ST_PLACE_PREFIX = frozenset({
+    'mount', 'mt', 'lake', 'cape', 'fort', 'port', 'old', 'new',
+    'south', 'north', 'east', 'west', 'upper', 'lower', 'great', 'little',
+})
+
+_ST_TITLE_PREFIX = frozenset({
+    'father', 'brother', 'sister', 'pope', 'bishop', 'cardinal',
+    'reverend', 'monsignor', 'archbishop', 'patriarch', 'saint',
+    'mister', 'missus', 'miss', 'doctor', 'professor',
+    'king', 'queen', 'prince', 'princess', 'lord', 'lady',
+    'duke', 'duchess', 'earl', 'count', 'baron', 'baroness',
+    'sir', 'dame',
+})
+
+_ST_DOT_RE = re.compile(r'(?<!\w)St\.(?=\W|$)')
+
+
+def _resolve_st_dot(text):
+    """Expand 'St.' to 'Saint' or 'Street' based on local context.
+
+    Decision tree (first match wins):
+      1. Preceding word is an ordinal (\\d+ + st/nd/rd/th) → Street.
+      2. Preceding word is a place-name prefix (Mount, Lake, Old, …) → Saint.
+      3. Preceding word is a person-title prefix (Father, Doctor, King, …) → Saint.
+      4. Preceding word is capitalised AND `St.` is not at the start of a
+         sentence (text before doesn't end with .!? and isn't empty) → Street.
+      5. Default → Saint (preserves the common 'St. <Name>' expansion).
+    """
+    def _replace(m):
+        before = text[:m.start()].rstrip()
+        # Last whitespace-delimited token, with surrounding punctuation
+        # stripped. Allows digit-leading tokens like "42nd" to be detected
+        # by the ordinal rule below.
+        tokens_before = before.split()
+        prev_word_raw = (
+            tokens_before[-1].strip(",.;:!?\"'()[]{}<>")
+            if tokens_before else ''
+        )
+        prev_word = prev_word_raw.lower()
+        prev_is_capital = bool(prev_word_raw and prev_word_raw[0].isupper())
+        is_sentence_start = (
+            not before
+            or re.search(r'[.!?]\s*$', before) is not None
+        )
+
+        if re.fullmatch(r"\d+(?:st|nd|rd|th)", prev_word, re.IGNORECASE):
+            return 'Street'
+        if prev_word in _ST_PLACE_PREFIX:
+            return 'Saint'
+        if prev_word in _ST_TITLE_PREFIX:
+            return 'Saint'
+        if prev_is_capital and not is_sentence_start:
+            return 'Street'
+        return 'Saint'
+
+    return _ST_DOT_RE.sub(_replace, text)
+
+
+# `No.` → `Number` only when followed by a digit. Bare `No.` at sentence end
+# (a one-word reply) must stay as the word "No"; the unconditional rule
+# previously rewrote `She nodded. No. Not yet.` as `… Number Not yet.`.
+_NO_DOT_RE = re.compile(r'(?<!\w)No\.(?=\W|$)')
+
+
+def _resolve_no_dot(text):
+    """Expand 'No.' to 'Number' only when a digit follows (issue/lot/item
+    numbers). Otherwise leave 'No.' unchanged so it reads as the word "No"
+    with its sentence-ending period."""
+    def _replace(m):
+        after = text[m.end():].lstrip()
+        if re.match(r'\d', after):
+            return 'Number'
+        return m.group(0)
+    return _NO_DOT_RE.sub(_replace, text)
 
 
 def expand_abbreviations(text):
@@ -554,6 +671,8 @@ def expand_abbreviations(text):
         # Word-boundary-aware replacement
         pattern = re.escape(abbr)
         text = re.sub(r'(?<!\w)' + pattern + r'(?=\s|$)', expansion, text)
+    text = _resolve_st_dot(text)
+    text = _resolve_no_dot(text)
     return text
 
 
@@ -698,6 +817,57 @@ def apply_substitutions(text, substitutions):
 
 # --- Phoneme overrides + acronym spellout ---
 
+# Proper nouns where misaki's gold/silver lexicons are silent and espeak's
+# letter-rule G2P mispronounces. Canonical IPA — `_to_misaki_phonemes` folds
+# diphthongs at emit time. User overrides for the same word win
+# (see apply_builtin_phoneme_overrides).
+_BUILTIN_PHONEME_OVERRIDES = {
+    # US place names
+    'angeles':  'ˈændʒələs',     # Los Angeles
+    'yosemite': 'joʊsˈɛmɪti',    # Yosemite
+    'jolla':    'hˈɔɪə',         # La Jolla
+    # Irish / Scottish given names common in fiction
+    'sean':     'ʃˈɔn',
+    'siobhan':  'ʃəvˈɔn',
+    'aoife':    'ˈifə',
+    'niamh':    'nˈiv',
+    'caoimhe':  'kˈivə',
+    'eilidh':   'ˈeɪli',
+    # Other gaps and bugs
+    'blaise':   'blˈeɪz',         # Blaise Pascal; absent from misaki gold/silver
+    'dives':    'dˈaɪvz',         # silver has biblical /ˈdaɪvˌiːz/ for lowercase
+}
+
+
+def apply_builtin_phoneme_overrides(text, user_overrides):
+    """Wrap built-in proper-noun overrides as `[word](/IPA/)` markdown so
+    misaki's LINK_REGEX picks them up at rating 5. Skips any word the user
+    has explicitly configured in their phoneme overrides — the user list
+    always wins. Runs immediately before apply_phoneme_overrides; each
+    word is wrapped once across the two passes, so no double-wrapping."""
+    user_words = set()
+    if user_overrides:
+        for entry in user_overrides:
+            if not entry.get('enabled', True):
+                continue
+            w = (entry.get('word') or '').lower()
+            if w:
+                user_words.add(w)
+
+    for word, ipa in _BUILTIN_PHONEME_OVERRIDES.items():
+        if word in user_words:
+            continue
+        ipa_folded = _to_misaki_phonemes(ipa)
+        pattern = r'\b' + re.escape(word) + r'\b'
+        text = re.sub(
+            pattern,
+            lambda m, p=ipa_folded: f'[{m.group(0)}](/{p}/)',
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text
+
+
 def apply_phoneme_overrides(text, overrides):
     """Wrap matching words with misaki's inline-phoneme markdown.
 
@@ -840,5 +1010,6 @@ def normalize_text(text, lang='en-us', substitutions=None,
     text = apply_substitutions(text, substitutions)
     if is_english:
         text = apply_acronym_spellout(text, auto_acronyms)
+        text = apply_builtin_phoneme_overrides(text, phoneme_overrides)
         text = apply_phoneme_overrides(text, phoneme_overrides)
     return text

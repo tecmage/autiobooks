@@ -8,6 +8,7 @@ from autiobooks.text_processing import (
     clean_special_characters,
     apply_substitutions,
     apply_phoneme_overrides,
+    apply_builtin_phoneme_overrides,
     apply_acronym_spellout,
     apply_contextual_overrides,
     normalize_text,
@@ -144,6 +145,67 @@ class TestStripDiacritics:
 
 
 # ---------------------------------------------------------------------------
+# 2b. r\u00e9sum\u00e9 (CV/noun) preservation through normalize_unicode
+# ---------------------------------------------------------------------------
+
+class TestResumeNounPreservation:
+    """`r\u00e9sum\u00e9` (with at least one accent) must be tagged as the noun IPA
+    BEFORE strip_diacritics destroys the cue. Plain `resume` is left alone
+    and inherits misaki gold's verb pronunciation."""
+
+    def test_accented_singular_wrapped(self):
+        # Lowercase 'r' in source \u2192 lowercase 'r' in display text (the
+        # wrapper preserves the original case).
+        out = normalize_unicode("Her r\u00e9sum\u00e9 impressed.")
+        assert "[resume](/\u02c8\u0279\u025bz\u0259mA/)" in out
+
+    def test_capitalized_accented_wrapped(self):
+        # Title-cased R\u00e9sum\u00e9 (e.g. at sentence start) keeps its capital R.
+        out = normalize_unicode("R\u00e9sum\u00e9 writing is hard.")
+        assert "[Resume](/\u02c8\u0279\u025bz\u0259mA/)" in out
+
+    def test_accented_plural_wrapped(self):
+        out = normalize_unicode("A stack of r\u00e9sum\u00e9s on her desk.")
+        assert "[resumes](/\u02c8\u0279\u025bz\u0259mAz/)" in out
+
+    def test_only_second_accent(self):
+        # `resum\u00e9` (acute only on the final e) \u2014 common ASCII-keyboard fallback.
+        out = normalize_unicode("Her resum\u00e9 was perfect.")
+        assert "[resume](/" in out
+
+    def test_only_first_accent(self):
+        # `r\u00e9sume` \u2014 rare but possible OCR variant.
+        out = normalize_unicode("Her r\u00e9sume was perfect.")
+        assert "[resume](/" in out
+
+    def test_plain_resume_untouched(self):
+        # No accents anywhere \u2014 must stay bare for misaki's verb default.
+        out = normalize_unicode("She will resume reading.")
+        assert "[Resume" not in out
+        assert "[resume" not in out
+        assert "resume" in out
+
+    def test_resumed_resuming_untouched(self):
+        # Verb inflections \u2014 never the noun, must not match the regex.
+        out = normalize_unicode("He resumed work. She is resuming now.")
+        assert "[Resume" not in out
+        assert "resumed" in out and "resuming" in out
+
+    def test_non_english_leaves_accents(self):
+        # is_english=False skips strip_diacritics AND the noun preservation,
+        # because the surrounding text expects to keep accents for foreign G2P.
+        out = normalize_unicode("Su r\u00e9sum\u00e9 es bueno.", is_english=False)
+        assert "r\u00e9sum\u00e9" in out
+        assert "[Resume" not in out
+
+    def test_survives_full_pipeline(self):
+        # End-to-end: through normalize_text the markup must survive every pass
+        # and reach the final string intact.
+        out = normalize_text("Her r\u00e9sum\u00e9 was strong.")
+        assert "[resume](/\u02c8\u0279\u025bz\u0259mA/)" in out
+
+
+# ---------------------------------------------------------------------------
 # 3. Fraction expansion (in normalize_unicode, English only)
 # ---------------------------------------------------------------------------
 
@@ -202,8 +264,37 @@ class TestExpandAbbreviations:
     def test_ie(self):
         assert expand_abbreviations("i.e. that") == "that is that"
 
-    def test_st(self):
+    def test_st_saint_sentence_start(self):
         assert expand_abbreviations("St. Louis") == "Saint Louis"
+        assert expand_abbreviations("St. Patrick was here.") == "Saint Patrick was here."
+
+    def test_st_saint_after_lowercase(self):
+        assert expand_abbreviations("downtown St. Louis") == "downtown Saint Louis"
+        assert expand_abbreviations("in St. Louis, Missouri") == "in Saint Louis, Missouri"
+
+    def test_st_street_after_capital(self):
+        assert expand_abbreviations("Main St.") == "Main Street"
+        assert expand_abbreviations("Wall St. closed early.") == "Wall Street closed early."
+        assert expand_abbreviations("He lives on Main St. now.") == "He lives on Main Street now."
+
+    def test_st_street_ordinal(self):
+        assert expand_abbreviations("42nd St. is busy.") == "42nd Street is busy."
+
+    def test_st_place_prefix(self):
+        assert expand_abbreviations("Mount St. Helens") == "Mount Saint Helens"
+
+    def test_st_title_prefix_via_dr(self):
+        # 'Dr.' is expanded to 'Doctor' first (dict loop), then St. resolves to Saint.
+        assert expand_abbreviations("Dr. St. James") == "Doctor Saint James"
+
+    def test_st_royal_title(self):
+        assert expand_abbreviations("King St. Louis IX") == "King Saint Louis IX"
+
+    def test_st_at_end(self):
+        # The period of "St." is consumed by the abbreviation regex (same as
+        # all other entries in ABBREVIATIONS — this matches the prior
+        # behaviour for "St. → Saint" at sentence end).
+        assert expand_abbreviations("He lives on Main St.") == "He lives on Main Street"
 
     # Military abbreviations
     def test_maj(self):
@@ -225,6 +316,15 @@ class TestExpandAbbreviations:
 
     def test_ch(self):
         assert expand_abbreviations("Ch. 3") == "Chapter 3"
+
+    def test_no_dot_with_digit(self):
+        assert expand_abbreviations("Lot No. 5 was selected.") == "Lot Number 5 was selected."
+        assert expand_abbreviations("Issue No. 42") == "Issue Number 42"
+
+    def test_no_dot_one_word_reply(self):
+        # 'No.' as a one-word reply must stay as 'No' — not 'Number'.
+        assert expand_abbreviations("She nodded. No. Not yet.") == "She nodded. No. Not yet."
+        assert expand_abbreviations("He said: No. I refused.") == "He said: No. I refused."
 
     def test_no_mid_word_match(self):
         # "Mister" should not be re-expanded or mangled
@@ -835,6 +935,77 @@ class TestPhonemeOverrides:
         ]
         result = apply_phoneme_overrides("Hermione and Ron", overrides)
         assert result == "[Hermione](/H/) and [Ron](/R/)"
+
+
+# ---------------------------------------------------------------------------
+# 10b. apply_builtin_phoneme_overrides
+# ---------------------------------------------------------------------------
+
+class TestBuiltinPhonemeOverrides:
+    """Tests for apply_builtin_phoneme_overrides(text, user_overrides)."""
+
+    def test_los_angeles_wrapped(self):
+        out = apply_builtin_phoneme_overrides("I went to Los Angeles.", None)
+        assert '[Angeles](/ˈændʒələs/)' in out
+
+    def test_yosemite_wrapped(self):
+        out = apply_builtin_phoneme_overrides("Yosemite is huge.", None)
+        assert '[Yosemite](/' in out
+
+    def test_irish_name_wrapped(self):
+        out = apply_builtin_phoneme_overrides("Sean and Aoife", None)
+        assert '[Sean](/' in out
+        assert '[Aoife](/' in out
+
+    def test_user_override_preempts_builtin(self):
+        # User wraps angeles with their own IPA; builtin must NOT also wrap.
+        user = [{'word': 'angeles', 'ipa': 'aaa', 'enabled': True}]
+        out = apply_builtin_phoneme_overrides("Los Angeles", user)
+        assert '[Angeles](/' not in out
+        assert 'Angeles' in out  # untouched, user pass will wrap
+
+    def test_disabled_user_override_does_not_preempt(self):
+        user = [{'word': 'angeles', 'ipa': 'aaa', 'enabled': False}]
+        out = apply_builtin_phoneme_overrides("Los Angeles", user)
+        assert '[Angeles](/' in out
+
+    def test_case_insensitive(self):
+        out = apply_builtin_phoneme_overrides("ANGELES, angeles, Angeles", None)
+        assert out.count('](/ˈændʒələs/)') == 3
+
+    def test_word_boundary(self):
+        # Substring match must not fire — running letters should not match
+        # the bare word 'angeles' inside a glommed-together token.
+        out = apply_builtin_phoneme_overrides("losangelesnoboundary", None)
+        assert '[Angeles]' not in out
+        assert '[angeles]' not in out
+
+    def test_blaise_wrapped(self):
+        # Blaise Pascal is absent from misaki gold/silver; the builtin
+        # override ships a canonical /bleɪz/ pronunciation. Folded eɪ → A.
+        out = apply_builtin_phoneme_overrides("A man named Blaise.", None)
+        assert "[Blaise](/blˈAz/)" in out
+
+    def test_dives_verb_wrapped(self):
+        # misaki silver shipped the biblical /ˈdaɪvˌiːz/ for the lowercase
+        # entry, breaking the common verb. Folded aɪ → I.
+        out = apply_builtin_phoneme_overrides("She dives into the pool.", None)
+        assert "[dives](/dˈIvz/)" in out
+
+    def test_dives_capitalized_also_wrapped(self):
+        # `apply_builtin_phoneme_overrides` is case-insensitive so capitalized
+        # biblical `Dives` also gets the verb pronunciation. Documented
+        # trade-off: the verb/plural is far more common than the proper noun.
+        out = apply_builtin_phoneme_overrides("Dives lived in luxury.", None)
+        assert "[Dives](/dˈIvz/)" in out
+
+    def test_user_override_preempts_blaise(self):
+        # User-defined override for `blaise` must suppress the builtin so the
+        # user's pass (which runs after) is the only emitter — no double-wrap.
+        user = [{'word': 'blaise', 'ipa': 'xxx', 'enabled': True}]
+        out = apply_builtin_phoneme_overrides("Blaise Pascal", user)
+        assert "[Blaise]" not in out
+        assert "Blaise" in out
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,22 @@ PRs are welcome!
 
 ## Changelog
 
+#### 2.1.1
+
+**Pronunciation fixes:**
+- **`blaise → /bleɪz/`** — added to the built-in proper-noun overrides; the given name was absent from misaki's gold/silver lexicons so it fell through to espeak's letter-rule G2P, which is unreliable for non-English etymology
+- **`dives → /daɪvz/`** — fixes a misaki silver lexicon bug: the lowercase entry shipped with the biblical proper-noun pronunciation `/ˈdaɪvˌiːz/` (two syllables, stressed first-then-second), turning every everyday verb/plural ("she dives in", "five dives") into the Luke-16 character. The override is case-insensitive so capitalized `Dives` also gets the verb reading — acceptable trade-off because the biblical character is vanishingly rare in modern reading material
+- **`résumé` (CV/noun) preserved before diacritic strip** — misaki gold has only the verb pronunciation `/ɹəzˈum/`, so `résumé` was previously read as the verb "to continue" after `strip_diacritics` erased the accent cue. New `_RESUME_NOUN_RE` runs inside `normalize_unicode` *before* the strip and wraps any accented spelling (`résumé`, `Résumé`, `resumé`, `résume`, plus their `-s` plurals) as `[resume](/ˈɹɛzəmeɪ/)` markdown; plain unaccented `resume` is untouched and keeps misaki's verb default
+
+**Custom voices (beta):**
+- **Drop-in `.pt` voice packs** — place PyTorch voice tensors in `~/.autiobooks/voices/` and they appear in the voice dropdown alongside Kokoro's 54 built-in voices, marked with a ✨ sparkle (e.g. `✨ 🇬🇧 bm_steve`). Compatible with files produced by [kvoicewalk](https://github.com/RobViren/kvoicewalk). Tensors are loaded with `weights_only=True`, kept on CPU regardless of GPU setting, and validated as shape `(N, 1, 256)` at load time so a malformed file fails with a named error instead of crashing inside synthesis
+- **Tools → Open Voices Folder…** — creates the directory if missing and opens it in the system file browser; the voice dropdown re-scans on next click so newly added files appear without restart
+- Voice names follow Kokoro's `<lang><gender>_<name>` convention (e.g. `bm_steve.pt` is treated as British male) so the language-flag emoji and language routing work without extra configuration
+- **Beta:** API and discovery behavior may change before the feature graduates; no in-app voice-pack training UI yet — `.pt` files must be produced externally (e.g. with kvoicewalk)
+
+**Test additions:**
+- 13 new cases in `tests/test_text_processing.py`: `TestResumeNounPreservation` (9 cases covering accented variants, plain-word passthrough, verb inflections, non-English language code, full-pipeline survival) and four additions to `TestBuiltinPhonemeOverrides` (blaise/dives wrapping, case-insensitive `Dives`, user override preempts builtin)
+
 #### 2.1.0
 
 **Pronunciation control:**
@@ -75,7 +91,7 @@ PRs are welcome!
 - Windows build script fix
 
 **Test infrastructure:**
-- pytest suite (`tests/test_text_processing.py`, `tests/test_cli.py`) — 189 cases covering normalization, diacritics, fractions, abbreviations, roman numerals, heteronyms, special characters, substitutions, phoneme overrides, acronym spellout, the diphthong-folding helper, and the misaki preprocess whitespace patch (multi-paragraph regression suite that catches alignment drift the single-sentence audit harness cannot detect)
+- pytest suite (`tests/test_text_processing.py`, `tests/test_cli.py`) — 207 cases covering normalization, diacritics, fractions, abbreviations (including the context-aware `St.` Saint/Street and `No.` Number resolvers), roman numerals, heteronyms, special characters, substitutions, phoneme overrides (user + built-in proper-noun defaults), acronym spellout, the diphthong-folding helper, and the misaki preprocess whitespace patch (multi-paragraph regression suite that catches alignment drift the single-sentence audit harness cannot detect)
 
 #### 2.0.0
 
