@@ -16,6 +16,29 @@ def show_append_dialog(parent):
     dialog.resizable(False, False)
     dialog.grab_set()
 
+    # Mutable flags so the close handler can tell whether the background
+    # append worker (defined below, in do_append) is currently running,
+    # and so the worker's progress callback can abort a confirmed cancel.
+    append_running = [False]
+    append_cancelled = [False]
+
+    def on_close():
+        if append_running[0]:
+            if messagebox.askyesno(
+                    'Append in progress',
+                    'Cancel the append in progress?',
+                    parent=dialog):
+                # The progress callback raises on this flag, which makes
+                # append_m4b kill its ffmpeg (the documented abort path) —
+                # without it the mux would keep running headless after the
+                # dialog closed, despite the user confirming a cancel.
+                append_cancelled[0] = True
+                dialog.destroy()
+            return
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", on_close)
+
     for row, label in enumerate(['Base file:', 'Append file:', 'Output file:']):
         tk.Label(dialog, text=label).grid(row=row * 2, column=0, sticky='e',
                                           padx=10, pady=(6, 0))
@@ -33,7 +56,15 @@ def show_append_dialog(parent):
     append_info_label = ttk.Label(dialog, text='', style='Summary.TLabel')
     append_info_label.grid(row=3, column=1, sticky='w', padx=5)
 
+    # Per-label generation counters: a slow probe for a file the user
+    # replaced via a second Browse click must not overwrite the label with
+    # stale results after the fast probe for the new file already landed.
+    _probe_tokens = {}
+
     def load_file_info(path, label):
+        _probe_tokens[id(label)] = _probe_tokens.get(id(label), 0) + 1
+        token = _probe_tokens[id(label)]
+
         def run():
             try:
                 dur = probe_duration(path)
@@ -44,7 +75,7 @@ def show_append_dialog(parent):
             except Exception as e:
                 print(f'probe failed for {path}: {e}', file=sys.stderr)
                 text = f'could not read file ({type(e).__name__})'
-            if dialog.winfo_exists():
+            if dialog.winfo_exists() and _probe_tokens.get(id(label)) == token:
                 dialog.after(0, lambda t=text: label.config(text=t))
         threading.Thread(target=run, daemon=True).start()
 
@@ -95,6 +126,17 @@ def show_append_dialog(parent):
                     'Error', f'{label} file must be an .m4b file.',
                     parent=dialog)
                 return
+        # Writing onto an input would make ffmpeg truncate a file the concat
+        # demuxer is still reading — destroys the base audiobook.
+        out_norm = os.path.normcase(os.path.abspath(output))
+        for path, label in [(base, 'Base'), (append, 'Append')]:
+            if os.path.normcase(os.path.abspath(path)) == out_norm:
+                messagebox.showerror(
+                    'Error',
+                    f'Output must be a different file from the '
+                    f'{label.lower()} file.',
+                    parent=dialog)
+                return
         output_parent = Path(output).parent
         if not output_parent.is_dir():
             messagebox.showerror(
@@ -110,20 +152,30 @@ def show_append_dialog(parent):
             return
         append_btn.configure(state='disabled')
         status_label.config(text='Appending... 0%')
+        append_running[0] = True
 
         def run():
             try:
                 def progress(pct):
-                    dialog.after(0, lambda p=pct: status_label.config(
-                        text=f'Appending... {p}%'))
+                    if append_cancelled[0]:
+                        # Raising here makes append_m4b kill its ffmpeg
+                        # child and clean up the .part output.
+                        raise RuntimeError('Append cancelled by user')
+                    if dialog.winfo_exists():
+                        dialog.after(0, lambda p=pct: status_label.config(
+                            text=f'Appending... {p}%'))
                 append_m4b(base, append, output, progress_callback=progress)
-                dialog.after(0, lambda: status_label.config(text='Done!'))
+                if dialog.winfo_exists():
+                    dialog.after(0, lambda: status_label.config(text='Done!'))
             except Exception as e:
-                dialog.after(0, lambda err=e: messagebox.showerror(
-                    'Error', str(err), parent=dialog))
-                dialog.after(0, lambda: status_label.config(text='Error'))
+                if dialog.winfo_exists():
+                    dialog.after(0, lambda err=e: messagebox.showerror(
+                        'Error', str(err), parent=dialog))
+                    dialog.after(0, lambda: status_label.config(text='Error'))
             finally:
-                dialog.after(0, lambda: append_btn.configure(state='normal'))
+                append_running[0] = False
+                if dialog.winfo_exists():
+                    dialog.after(0, lambda: append_btn.configure(state='normal'))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -193,6 +245,9 @@ def show_preferences(parent, prefs, apply_theme, save_current_config, add_toolti
         save_current_config()
         dlg.destroy()
 
+    # Toggles mutate live Tk vars immediately; persist them however the
+    # dialog is dismissed (Close button or window-manager X).
+    dlg.protocol("WM_DELETE_WINDOW", save_and_close)
     ttk.Button(dlg, text='Close', command=save_and_close).pack(
         side=tk.RIGHT, padx=15, pady=15)
 
@@ -217,7 +272,8 @@ def show_substitutions_dialog(parent, initial_subs, on_save):
     list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
     cols = ('find', 'replace', 'case', 'whole')
-    tree = ttk.Treeview(list_frame, columns=cols, show='headings', height=10)
+    tree = ttk.Treeview(list_frame, columns=cols, show='headings', height=10,
+                        selectmode='extended')
     tree.heading('find', text='Find')
     tree.heading('replace', text='Replace')
     tree.heading('case', text='Case')
@@ -279,8 +335,8 @@ def show_substitutions_dialog(parent, initial_subs, on_save):
         sel = tree.selection()
         if not sel:
             return
-        idx = tree.index(sel[0])
-        del local_subs[idx]
+        for idx in sorted((tree.index(s) for s in sel), reverse=True):
+            del local_subs[idx]
         refresh()
 
     ttk.Button(btn_frame, text='Add', command=add_sub).pack(
@@ -296,6 +352,35 @@ def show_substitutions_dialog(parent, initial_subs, on_save):
         side=tk.RIGHT, padx=10, pady=10)
     ttk.Button(dlg, text='Cancel', command=dlg.destroy).pack(
         side=tk.RIGHT, pady=10)
+
+
+def _sanitize_ipa(raw):
+    """Strip characters that break misaki's `[word](/IPA/)` link markdown.
+
+    Dictionary IPA commonly carries optional-schwa parens (/ˈlɪs(ə)n/) or
+    bracket delimiters ([ˈlɪsn]); misaki's LINK_REGEX stops the phoneme
+    group at the first ')', which silently DROPS the word from the audio
+    and voices the residue as junk. Parens/brackets/newlines are removed
+    (keeping the enclosed phonemes) and surrounding slashes trimmed — the
+    emitter adds its own. Returns '' if nothing pronounceable remains."""
+    cleaned = raw.strip().strip('/')
+    for ch in '()[]\n\r':
+        cleaned = cleaned.replace(ch, '')
+    return cleaned.strip()
+
+
+def _coerce_str(value):
+    """Normalize a config-sourced field to str, treating None as ''.
+
+    `dict.get(key, default)` returns the stored None (not the default)
+    when the key is present with a null value — a hand-edited config's
+    `"word": null` reaches here as None, not "". str(None) would render
+    as the literal text "None" instead of empty."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ''
+    return str(value)
 
 
 def show_phoneme_overrides_dialog(parent, initial, on_save):
@@ -325,7 +410,7 @@ def show_phoneme_overrides_dialog(parent, initial, on_save):
         dlg,
         text='IPA cheat-sheet: ˈ primary stress · ˌ secondary · '
              'ə schwa · ɜ her · æ cat · ʃ ship · θ think · ð this',
-        fg='#555',
+        fg='#888',
         wraplength=860, justify='left').pack(padx=10, pady=(0, 5))
 
     list_frame = ttk.Frame(dlg)
@@ -347,7 +432,18 @@ def show_phoneme_overrides_dialog(parent, initial, on_save):
     vsb.pack(side=tk.RIGHT, fill=tk.Y)
     tree.pack(fill=tk.BOTH, expand=True)
 
-    local = [dict(o) for o in initial]
+    # Normalize word/ipa to str on entry (not at each use site) so
+    # refresh/dedup/export all see well-typed rows — a config with
+    # {"word": null, ...} used to reach refresh() as None, render as the
+    # literal text "None" in the tree, and crash import_json's dedup
+    # comprehension (None.lower()) with no try/except around it.
+    local = []
+    for o in initial:
+        entry = dict(o)
+        entry['word'] = _coerce_str(entry.get('word', ''))
+        entry['ipa'] = _coerce_str(entry.get('ipa', ''))
+        if entry['word']:
+            local.append(entry)
 
     def refresh():
         tree.delete(*tree.get_children())
@@ -379,8 +475,16 @@ def show_phoneme_overrides_dialog(parent, initial, on_save):
 
     def add_override():
         w = word_entry.get().strip()
-        i = ipa_entry.get().strip()
+        i = _sanitize_ipa(ipa_entry.get())
         if not w or not i:
+            return
+        # Same dedup the JSON importer applies: two enabled overrides for one
+        # word nest their `[word](/IPA/)` markdown and garble the audio.
+        if any((o.get('word') or '').lower() == w.lower() for o in local):
+            messagebox.showerror(
+                'Duplicate word',
+                f'An override for "{w}" already exists — remove it first.',
+                parent=dlg)
             return
         local.append({
             'word': w,
@@ -445,8 +549,8 @@ def show_phoneme_overrides_dialog(parent, initial, on_save):
         for entry in data:
             if not isinstance(entry, dict):
                 continue
-            w = str(entry.get('word', '')).strip()
-            i = str(entry.get('ipa', '')).strip()
+            w = _coerce_str(entry.get('word', '')).strip()
+            i = _sanitize_ipa(_coerce_str(entry.get('ipa', '')))
             if not w or not i:
                 continue
             if w.lower() in existing:

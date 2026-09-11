@@ -3,10 +3,11 @@ import io
 import os
 import re
 import warnings
+from urllib.parse import unquote
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup, NavigableString
-from PIL import Image, ImageTk
+from PIL import Image
 
 # Suppress ebooklib's internal XML query warning
 warnings.filterwarnings('ignore', category=FutureWarning, module='ebooklib.epub')
@@ -22,7 +23,12 @@ BLOCK_TAGS = {
     'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
     'blockquote', 'pre', 'li',
     'section', 'article', 'aside', 'header', 'footer', 'main',
-    'table', 'tr', 'td', 'th', 'caption',
+    # `td`/`th` deliberately excluded — they're joined inline per row (see
+    # the table-flattening pass in extract_text_from_html) so each ROW is one
+    # line/TTS-segment. As block tags every cell landed on its own line and
+    # the TTS loop read each one as an isolated utterance (slow, choppy stat
+    # blocks in LitRPG fiction).
+    'table', 'tr', 'caption',
     'dt', 'dd', 'dl',
     'figure', 'figcaption', 'address',
 }
@@ -46,8 +52,14 @@ _EXCLUDED_TOC_TITLES = {
 
 def _is_footnote_ref(tag):
     """Detect footnote/endnote reference links that clutter TTS output."""
+    # epub:type is a space-separated token list (EPUB 3 spec), not a single
+    # value — lxml preserves it as one raw attribute string
+    # (e.g. "noteref backlink"), so an == check misses every multi-token
+    # case. Only 'noteref' opts in; 'backlink' (the link back to the note
+    # body) and 'footnote' (the note body itself) are legitimate content
+    # and must not be swallowed here.
     epub_type = tag.get('epub:type', '')
-    if epub_type == 'noteref':
+    if 'noteref' in epub_type.split():
         return True
     classes = set(tag.get('class', []))
     if classes & FOOTNOTE_CLASSES:
@@ -87,6 +99,30 @@ def extract_text_from_html(html_content):
     for hr in soup.find_all('hr'):
         hr.replace_with('\n\n')
 
+    # Flatten table cells inline so each ROW (not each cell) is one line and
+    # thus one TTS segment. Cells join with ', '; a cell ending in ':' (a stat
+    # label) joins to its value with a space instead, so "Strength: 432, Mana:
+    # 306" reads naturally. The whole row is rebuilt (not just separators
+    # appended) because the inter-cell whitespace/newlines in the source HTML
+    # would otherwise survive and re-split the row. Empty cells are dropped.
+    for tr in soup.find_all('tr'):
+        # Skip rows that contain a nested table — an outer cell's get_text()
+        # already includes the inner table's text, so processing this row
+        # AND the inner table's rows double-speaks every inner cell. Only
+        # the innermost rows (no descendant <table>) get flattened; the
+        # outer row is left for the generic block-tag pass to separate.
+        if tr.find('table'):
+            continue
+        cells = [c.get_text(' ', strip=True) for c in tr.find_all(['td', 'th'])]
+        cells = [c for c in cells if c]
+        parts = []
+        for i, text in enumerate(cells):
+            parts.append(text)
+            if i < len(cells) - 1:
+                parts.append(' ' if text.endswith(':') else ', ')
+        tr.clear()
+        tr.append(NavigableString(''.join(parts)))
+
     # Insert newline markers around block-level elements
     for tag in soup.find_all(BLOCK_TAGS):
         tag.insert_before(NavigableString('\n'))
@@ -105,22 +141,41 @@ def extract_text_from_html(html_content):
 
 def get_book(file_path, resized):
     book = epub.read_epub(file_path, options={'ignore_ncx': True})
+    # A pure EPUB2 whose NCX navMap yields zero DAISY-namespace navPoints
+    # (e.g. an empty <navMap/>) makes ebooklib set book.toc to a bare Link
+    # object instead of a list — truthy but not iterable, so every
+    # downstream `if toc:` / `for entry in toc:` would raise TypeError.
+    if not isinstance(getattr(book, 'toc', None), (list, tuple)):
+        book.toc = []
     chapters = find_document_chapters_and_extract_texts(book)
-    cover_image = get_cover_image(book, resized=resized)
+    # A cover PIL can't decode (SVG cover item, corrupt JPEG) must not
+    # abort the load of an otherwise readable book — fall back to the
+    # placeholder cover instead.
+    try:
+        cover_image = get_cover_image(book, resized=resized)
+    except Exception:
+        cover_image = None
     return (book, chapters, cover_image)
 
 
 def get_book_cached(file_path, resized):
-    """Return (book, chapters, cover_image), cached per (path, mtime, resized).
+    """Return (book, chapters, cover_image), cached per
+    (path, mtime, size, resized).
 
     Re-parses when the file is modified on disk. Cover images are PhotoImage
     objects when resized=True; callers must keep a reference to prevent GC.
+    Size is included alongside mtime because some copy/sync tools preserve
+    the original mtime on a replaced file, which would otherwise serve a
+    stale cached parse forever.
     """
     try:
-        mod_time = os.path.getmtime(file_path)
+        st = os.stat(file_path)
+        mod_time = st.st_mtime
+        size = st.st_size
     except OSError:
         mod_time = 0
-    cache_key = (str(file_path), mod_time, bool(resized))
+        size = 0
+    cache_key = (str(file_path), mod_time, size, bool(resized))
     cached = _chapter_cache.get(cache_key)
     if cached is not None:
         return cached
@@ -172,12 +227,95 @@ def _is_excluded_chapter(chapter, toc_titles):
     return False
 
 
+def _spine_ordered_items(book):
+    """Return the book's items in spine (reading) order, manifest order after.
+
+    get_items() yields manifest order, which some EPUBs write differently
+    from the spine — converting in manifest order shuffles audio chapters
+    while the TOC-driven tree still looks correct. The spine is the
+    authoritative reading order; items not in the spine (cover docs, images,
+    css) keep their manifest order, after the spine block.
+    """
+    items = list(book.get_items())
+    spine_order = {}
+    for idx, entry in enumerate(getattr(book, 'spine', None) or []):
+        if isinstance(entry, (tuple, list)):
+            idref = entry[0]
+        elif hasattr(entry, 'id'):
+            idref = entry.id
+        else:
+            idref = entry
+        spine_order.setdefault(idref, idx)
+    in_spine = sorted(
+        (it for it in items if getattr(it, 'id', None) in spine_order),
+        key=lambda it: spine_order[it.id])
+    rest = [it for it in items if getattr(it, 'id', None) not in spine_order]
+    return in_spine + rest
+
+
+# Calibre's file-size splitter names the pieces of an oversized source file
+# `part0004_split_000.html`, `part0004_split_001.html`, … — the split is
+# purely technical, not a chapter boundary.
+_CALIBRE_SPLIT_RE = re.compile(r'^(?P<stem>.+)_split_\d+$')
+
+
+def _split_group_key(file_name):
+    """Group key for Calibre `_split_NNN` sibling files: (dir, base stem),
+    or None when the name doesn't follow the split convention."""
+    dirname, _, base = file_name.rpartition('/')
+    stem = base.rsplit('.', 1)[0] if '.' in base else base
+    m = _CALIBRE_SPLIT_RE.match(stem)
+    if not m:
+        return None
+    return (dirname, m.group('stem'))
+
+
+def _toc_href_to_filename(href):
+    """Normalize a TOC href for matching against manifest file_names: strip
+    the #fragment, unquote percent-encoding (ebooklib's manifest parsing
+    unquotes but _parse_ncx/_parse_nav don't), and fold backslashes to
+    forward slashes (OCF forbids backslash in names, but ebooklib's own
+    write_epub emits backslash hrefs when run on Windows)."""
+    return unquote(href.split('#')[0]).replace('\\', '/')
+
+
+def _toc_referenced_files(toc, result=None):
+    """Set of every document filename any TOC entry (Link or Section) points
+    at. Unlike _build_toc_map this keeps hrefs whose entry has no title —
+    a title-less entry still claims the file as a chapter start."""
+    if result is None:
+        result = set()
+    for entry in toc:
+        if isinstance(entry, tuple):
+            section, children = entry
+            href = getattr(section, 'href', '') or ''
+            if href:
+                result.add(_toc_href_to_filename(href))
+            _toc_referenced_files(children, result)
+        else:
+            href = getattr(entry, 'href', '') or ''
+            if href:
+                result.add(_toc_href_to_filename(href))
+    return result
+
+
 def find_document_chapters_and_extract_texts(book):
     """Returns every chapter that is an ITEM_DOCUMENT
-    and enriches each chapter with extracted_text."""
-    toc_titles = _build_toc_map(book.toc) if getattr(book, 'toc', None) else {}
+    and enriches each chapter with extracted_text.
+
+    Calibre `_split_NNN` continuation files are folded into their preceding
+    sibling: some split books put the whole chapter body in a `_split_001`
+    file the TOC never references (one had a 2-word "Chapter 1" stub as the
+    TOC-referenced `_split_000`), so kept separate they surface as dozens of
+    untitled leftover chapters and doubled m4b markers. A split sibling the
+    TOC *does* reference stays its own chapter — that's the page-break kind
+    of split, where the TOC points at each piece as a real chapter start.
+    """
+    toc = getattr(book, 'toc', None) or []
+    toc_titles = _build_toc_map(toc) if toc else {}
+    toc_refs = _toc_referenced_files(toc) if toc else set()
     document_chapters = []
-    for chapter in book.get_items():
+    for chapter in _spine_ordered_items(book):
         if not is_valid_chapter(chapter):
             continue
         if _is_excluded_chapter(chapter, toc_titles):
@@ -186,6 +324,19 @@ def find_document_chapters_and_extract_texts(book):
         if xml is None:
             continue
         chapter.extracted_text = extract_text_from_html(xml)
+        if (document_chapters
+                and chapter.file_name not in toc_refs
+                and _split_group_key(chapter.file_name) is not None
+                and (_split_group_key(chapter.file_name)
+                     == _split_group_key(document_chapters[-1].file_name))):
+            # A merged group keeps the FIRST sibling's file_name, so a
+            # _split_002 still matches its group and TOC/title lookups
+            # (keyed on the _split_000 name) work on the merged chapter.
+            prev = document_chapters[-1]
+            pieces = (prev.extracted_text.rstrip(),
+                      chapter.extracted_text.lstrip())
+            prev.extracted_text = '\n'.join(p for p in pieces if p)
+            continue
         document_chapters.append(chapter)
     return document_chapters
 
@@ -211,16 +362,30 @@ def _build_toc_map(toc, result=None):
         result = {}
     for entry in toc:
         if isinstance(entry, tuple):
-            # (Section, [children]) — recurse into children
-            _build_toc_map(entry[1], result)
+            # (Section, [children]) — ebooklib puts the parent navPoint's
+            # own document href on the Section, not just its children. A
+            # Section with a truthy href is itself a real spine document
+            # (e.g. a "Part I" page) and must be mapped like a Link before
+            # recursing, or it loses its TOC title and (for a Section-form
+            # "Cover" label) becomes invisible to _is_excluded_chapter.
+            section, children = entry
+            section_href = getattr(section, 'href', '') or ''
+            section_title = getattr(section, 'title', '') or ''
+            if section_href and section_title:
+                filename = _toc_href_to_filename(section_href)
+                result.setdefault(filename, section_title)
+            _build_toc_map(children, result)
         else:
             # epub.Link object with .href and .title
             href = getattr(entry, 'href', '') or ''
             title = getattr(entry, 'title', '') or ''
             if href and title:
-                # Strip fragment identifiers (e.g. "chapter1.xhtml#section2")
-                filename = href.split('#')[0]
-                result[filename] = title
+                # Fragment stripped (e.g. "chapter1.xhtml#section2").
+                # First entry wins for files with multiple TOC entries — the
+                # chapter tree shows the first section title, so the m4b
+                # chapter marker must match it.
+                filename = _toc_href_to_filename(href)
+                result.setdefault(filename, title)
     return result
 
 
@@ -290,16 +455,25 @@ def resized_image(item):
     background = Image.new('RGB', (200, 300), 'gray')
     offset = ((200 - new_size[0])//2, (300 - new_size[1])//2)
     background.paste(resized, offset)
+    # Imported lazily: PIL.ImageTk imports tkinter at module top, which
+    # must not be required for headless CLI runs (resized=False paths).
+    from PIL import ImageTk
     return ImageTk.PhotoImage(background)
 
 
 def get_cover_image(book, resized):
-    for item in book.get_items():
+    # Two passes: a flagged ITEM_COVER always wins, regardless of manifest
+    # order. Scanning both types in one loop let an earlier-in-manifest
+    # ITEM_IMAGE named e.g. "back-cover.png" beat the real ITEM_COVER that
+    # happened to appear later.
+    items = list(book.get_items())
+    for item in items:
         if item.get_type() == ebooklib.ITEM_COVER:
             if resized:
                 return resized_image(item)
             else:
                 return item.get_content()
+    for item in items:
         if item.get_type() == ebooklib.ITEM_IMAGE:
             if 'cover' in item.get_name().lower():
                 if resized:

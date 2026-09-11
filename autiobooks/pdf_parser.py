@@ -2,7 +2,7 @@
 
 import io
 import re
-from PIL import Image, ImageTk
+from PIL import Image
 from pypdf import PdfReader
 
 
@@ -41,6 +41,32 @@ def _clean_pdf_text(text):
     return '\n'.join(lines)
 
 
+_ENCRYPTED_MESSAGE = (
+    'This PDF is password-protected. Remove the password '
+    '(e.g. with a PDF tool) and try again.')
+
+
+def _decrypt_or_raise(reader):
+    """Handle an encrypted reader: owner-password-only PDFs (the common
+    "no copy/no print" restriction, with an EMPTY user password) are
+    transparently readable by pypdf — `PdfReader.__init__` already tries an
+    empty password automatically, so `is_encrypted` alone can't tell us
+    whether the content is actually accessible. Try `decrypt('')` and then
+    probe real access; raise the friendly message only when that genuinely
+    fails (a real user password is required).
+    """
+    try:
+        reader.decrypt('')
+    except Exception:
+        pass
+    try:
+        if len(reader.pages) == 0:
+            raise ValueError('empty document')
+        _ = reader.pages[0]
+    except Exception:
+        raise ValueError(_ENCRYPTED_MESSAGE)
+
+
 def get_pdf_book(file_path, resized=True):
     """Parse a PDF file and return (book, chapters, cover_image).
 
@@ -48,13 +74,21 @@ def get_pdf_book(file_path, resized=True):
     to page groups if no outline is present.
     """
     reader = PdfReader(file_path)
+    if reader.is_encrypted:
+        _decrypt_or_raise(reader)
 
     meta = reader.metadata or {}
+    # creation_date_raw looks like 'D:20230115120000' — strip the prefix so
+    # the year regex in get_publication_year (which requires a word
+    # boundary after the year) can match.
+    raw_date = str(getattr(meta, 'creation_date_raw', '') or '')
+    if raw_date.startswith('D:') and len(raw_date) >= 6:
+        raw_date = raw_date[2:6]
     metadata = {
         'DC:title': getattr(meta, 'title', '') or '',
         'DC:creator': getattr(meta, 'author', '') or '',
         'DC:publisher': '',
-        'DC:date': getattr(meta, 'creation_date_raw', '') or '',
+        'DC:date': raw_date,
         'DC:description': getattr(meta, 'subject', '') or '',
     }
 
@@ -124,6 +158,13 @@ def _extract_cover(reader, resized):
                 color_space = obj.get('/ColorSpace')
                 bits = obj.get('/BitsPerComponent', 8)
                 filt = obj.get('/Filter')
+                # /Filter may be an ArrayObject (list subclass) for a single
+                # filter (`[/DCTDecode]`) or a decode chain
+                # (`[/FlateDecode /DCTDecode]`); pypdf applies filters in
+                # order, so the LAST element is the one that determines the
+                # final encoding of the stored bytes returned by get_data().
+                if isinstance(filt, (list, tuple)):
+                    filt = str(filt[-1]) if filt else None
 
                 if filt in ('/DCTDecode', '/JPXDecode'):
                     img = Image.open(io.BytesIO(data))
@@ -145,6 +186,9 @@ def _extract_cover(reader, resized):
                     offset = ((200 - new_size[0]) // 2,
                               (300 - new_size[1]) // 2)
                     background.paste(img, offset)
+                    # Lazy: PIL.ImageTk imports tkinter, which headless
+                    # CLI runs (resized=False) must not require.
+                    from PIL import ImageTk
                     return ImageTk.PhotoImage(background)
                 else:
                     buf = io.BytesIO()
@@ -155,16 +199,67 @@ def _extract_cover(reader, resized):
     return None
 
 
+def get_pdf_cover_bytes(file_path):
+    """Full-size PNG cover bytes for embedding in output files, or None.
+
+    Re-opens the PDF on demand — callers usually hold only a PdfBook (which
+    keeps no reader) or a bare path, and the cover is needed once per
+    conversion.
+    """
+    try:
+        reader = PdfReader(file_path)
+    except Exception:
+        return None
+    return _extract_cover(reader, resized=False)
+
+
 def _chapters_from_outline(reader, outline):
-    """Build chapters from PDF outline entries."""
+    """Build chapters from PDF outline entries.
+
+    Page ranges are [start, end) where end is the smallest LATER entry's
+    start page that is strictly greater than this entry's own start page
+    (falling back to total_pages). A plain "next entry" lookup breaks on an
+    out-of-order outline (e.g. a trailing bookmark pointing backward): the
+    naive range would be empty (dropping the chapter) while the following
+    chapter's range re-reads the same pages (duplicated audio). Scanning
+    ALL later entries for the smallest qualifying start handles outlines
+    that are out of order without reordering the chapters themselves.
+
+    A child bookmark can land on the exact same page as its parent (e.g. a
+    "1.1 Overview" subsection heading that's the first thing on "Chapter
+    1"'s opening page). Bounding by "next later start page" alone gives
+    both entries the identical [start, end) range — byte-identical text
+    under two titles, not merely overlapping — so `ancestor_stack` tracks
+    each entry's nearest shallower-level ancestor by (level, start_page)
+    and such same-page children are dropped outright rather than emitted
+    as a phantom duplicate chapter. Widening the parent's own range to
+    swallow the child instead would turn the exact duplicate into
+    overlapping duplication and defeat `find_duplicates`.
+    """
     chapters = []
     total_pages = len(reader.pages)
+    ancestor_stack = []  # (level, start_page) of currently-open ancestors
 
     for i, (level, title, start_page) in enumerate(outline):
-        if i + 1 < len(outline):
-            end_page = outline[i + 1][2]
-        else:
-            end_page = total_pages
+        while ancestor_stack and ancestor_stack[-1][0] >= level:
+            ancestor_stack.pop()
+        parent_start = ancestor_stack[-1][1] if ancestor_stack else None
+        ancestor_stack.append((level, start_page))
+
+        if parent_start is not None and start_page == parent_start:
+            continue
+
+        end_page = total_pages
+        # Scan ALL entries (not just the ones after this one in list order)
+        # for the smallest start page that is strictly greater than this
+        # chapter's own start. An out-of-order outline entry (e.g. a
+        # trailing bookmark whose destination page is earlier than the
+        # previous entry's) would otherwise make the naive "next in list"
+        # lookup produce an empty range for one chapter while a later
+        # chapter's range re-reads the same pages.
+        for _level2, _title2, other_start in outline:
+            if other_start > start_page and other_start < end_page:
+                end_page = other_start
 
         text_parts = []
         for page_idx in range(start_page, min(end_page, total_pages)):
@@ -174,7 +269,11 @@ def _chapters_from_outline(reader, outline):
 
         text = _clean_pdf_text('\n'.join(text_parts))
         if text.strip():
-            ch = PdfChapter(title, text, f'page_{start_page + 1}.pdf')
+            # Index-suffixed so colliding bookmarks (same start page) never
+            # share a TOC key — must match the naming _build_book_toc uses
+            # for the same outline index, or the chapter tree's TOC-href
+            # matching silently loses hierarchy for every PDF chapter.
+            ch = PdfChapter(title, text, f'page_{start_page + 1}_{i}.pdf')
             chapters.append(ch)
 
     return chapters
@@ -204,28 +303,47 @@ def _chapters_from_pages(reader):
 
 
 def _build_book_toc(outline):
-    """Convert flat outline into ebooklib-style nested TOC structure."""
+    """Convert flat outline into ebooklib-style nested TOC structure.
+
+    An entry nests under the PREVIOUS entry only when its level is strictly
+    deeper; same-level entries stay siblings. (An earlier version compared
+    against the container's level seeded at 0, so every top-level entry
+    after the first — all at level 1 > 0 — was nested under the first,
+    turning chapter one into a section holding the rest of the book.)
+
+    Link hrefs are built with the same `page_{n}_{i}` naming
+    `_chapters_from_outline` uses (index `i` is this entry's position in
+    the same flat `outline` list both functions iterate, so the two stay in
+    sync) — the chapter tree matches TOC hrefs against `chapter.file_name`
+    exactly, and a same-page child that `_chapters_from_outline` drops as a
+    duplicate simply matches no chapter here and is skipped, rather than
+    every entry losing its match because the naming diverged.
+    """
     from ebooklib.epub import Link
 
     result = []
-    stack = [(0, result)]
+    stack = []  # (level, children_list) of currently-open ancestors
+    prev_level = None
+    prev_container = result
 
-    for level, title, page_num in outline:
-        link = Link(f'page_{page_num + 1}.pdf', title, '')
-        while len(stack) > 1 and stack[-1][0] >= level:
-            stack.pop()
-        parent_list = stack[-1][1]
-        if level > stack[-1][0] and parent_list:
-            last = parent_list[-1]
-            if not isinstance(last, tuple):
-                children = []
-                parent_list[-1] = (last, children)
-                stack.append((level, children))
-                stack[-1][1].append(link)
+    for i, (level, title, page_num) in enumerate(outline):
+        link = Link(f'page_{page_num + 1}_{i}.pdf', title, '')
+        if prev_level is not None and level > prev_level:
+            # Deeper than the previous entry: promote it to a section.
+            last = prev_container[-1]
+            if isinstance(last, tuple):
+                children = last[1]
             else:
-                stack.append((level, last[1]))
-                stack[-1][1].append(link)
+                children = []
+                prev_container[-1] = (last, children)
+            stack.append((prev_level, children))
         else:
-            parent_list.append(link)
+            # Sibling or shallower: close ancestors at or below this level.
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+        container = stack[-1][1] if stack else result
+        container.append(link)
+        prev_level = level
+        prev_container = container
 
     return result

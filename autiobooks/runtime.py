@@ -19,10 +19,19 @@ CONFIG_DIR = Path.home() / '.autiobooks'
 BIN_DIR = CONFIG_DIR / 'bin'
 CUDA_DIR = CONFIG_DIR / 'cuda'
 
-FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-ESPEAK_URL = "https://github.com/espeak-ng/espeak-ng/releases/download/1.51/espeak-ng-x64.zip"
+# Written into CUDA_DIR/bin as the LAST step of a CUDA runtime extraction;
+# _cuda_installed() requires it, so a partial extraction (cancel, crash,
+# power loss) can never masquerade as a complete install.
+_CUDA_COMPLETE_MARKER = '.install_complete'
 
-BIN_DIR.mkdir(parents=True, exist_ok=True)
+FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+
+try:
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Unwritable home (e.g. read-only profile) — don't crash at import;
+    # downloads into BIN_DIR will fail later with a real error message.
+    pass
 
 
 def _add_torch_lib_to_path():
@@ -55,7 +64,15 @@ def which_exe(name):
 
 
 def _download_file(url, dest, progress_callback=None):
-    """Download a file with optional progress callback."""
+    """Download a file with optional progress callback.
+
+    Raises IOError if fewer bytes arrive than the response's Content-Length
+    promised. CPython's HTTPResponse.read() intentionally does NOT raise on
+    a dropped non-chunked connection — it closes the connection and returns
+    b'', so the read loop exits normally and looks like a clean download
+    unless the caller checks the byte count itself (mirrors the same check
+    in _download_cuda_runtime.download_with_progress).
+    """
     req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     with urlopen(req, timeout=60) as response:
         total_size = int(response.headers.get('Content-Length', 0))
@@ -70,6 +87,9 @@ def _download_file(url, dest, progress_callback=None):
                 f.write(buffer)
                 if progress_callback and total_size:
                     progress_callback(downloaded, total_size)
+    if total_size and downloaded < total_size:
+        raise IOError(
+            f"Download truncated: got {downloaded} of {total_size} bytes")
 
 
 def _extract_zip(zip_path, extract_to):
@@ -87,10 +107,7 @@ def _extract_zip(zip_path, extract_to):
                 root_prefix = None
                 break
 
-        extract_root = extract_to
-        if root_prefix:
-            extract_root = extract_to / root_prefix.rstrip('/')
-            extract_to.mkdir(parents=True, exist_ok=True)
+        extract_to.mkdir(parents=True, exist_ok=True)
 
         for name in names:
             if root_prefix:
@@ -104,12 +121,25 @@ def _extract_zip(zip_path, extract_to):
                 continue
 
             target_path = extract_to / target_name
+            # Zip-slip guard: never write outside the extraction root.
+            try:
+                if not target_path.resolve().is_relative_to(
+                        extract_to.resolve()):
+                    continue
+            except (OSError, ValueError):
+                continue
             if name.endswith('/'):
                 target_path.mkdir(parents=True, exist_ok=True)
             else:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(target_path, 'wb') as dst:
+                # .tmp + rename so a kill mid-extract can't leave a
+                # truncated file at the final name (a half-written
+                # ffmpeg.exe would otherwise pass the existence check on
+                # every later launch).
+                tmp_path = target_path.with_name(target_path.name + '.tmp')
+                with zf.open(name) as src, open(tmp_path, 'wb') as dst:
                     dst.write(src.read())
+                os.replace(tmp_path, target_path)
 
 
 def _find_exe_in_dir(base_dir, exe_name):
@@ -132,8 +162,79 @@ def ensure_ffmpeg(root=None, progress_callback=None):
     """
     ensure_bin_in_path()
 
-    if which_exe('ffmpeg'):
-        return True
+    found = shutil.which('ffmpeg')
+    found_probe = shutil.which('ffprobe')
+    if found:
+        ffmpeg_ok = False
+        try:
+            check = subprocess.run([found, '-version'], capture_output=True,
+                                   timeout=15, **_SUBPROCESS_FLAGS)
+            ffmpeg_ok = check.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ffmpeg_ok = False
+
+        # ffprobe is called just as often as ffmpeg (duration/chapter
+        # probing in engine.py) — validating only ffmpeg here let a host
+        # with a working ffmpeg but no/broken ffprobe pass this gate and
+        # fail invisibly much later, deep inside a conversion.
+        ffprobe_ok = False
+        if found_probe:
+            try:
+                probe_check = subprocess.run(
+                    [found_probe, '-version'], capture_output=True,
+                    timeout=15, **_SUBPROCESS_FLAGS)
+                ffprobe_ok = probe_check.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ffprobe_ok = False
+
+        if ffmpeg_ok and ffprobe_ok:
+            return True
+
+        # ffmpeg and/or ffprobe is missing or doesn't run — e.g. truncated
+        # by a kill mid-extract on an earlier run, before extraction was
+        # atomic, or an incomplete system install missing ffprobe (the two
+        # ship together in every package this app downloads). Remove our
+        # managed copies and fall through to re-download; a broken system
+        # ffmpeg/ffprobe is not ours to touch.
+        import tkinter as _tk
+        from tkinter import messagebox as _messagebox
+
+        def _report_broken_ffmpeg(reason):
+            # Must not exit mute: every other failure exit from this
+            # function shows a dialog, but this one used to return False
+            # with no window, no dialog, no log line — before this fix the
+            # tkinter import below ran strictly after both `return False`s,
+            # making the muteness structural. A throwaway root is created
+            # here (mirrors _ask_user_download_cuda) since the download
+            # dialog's own root hasn't been created yet at this point.
+            local_root = root
+            if local_root is None:
+                local_root = _tk.Tk()
+                local_root.withdraw()
+                local_root.attributes('-topmost', True)
+            _messagebox.showerror(
+                "FFmpeg Broken",
+                f"ffmpeg/ffprobe are on PATH but {reason}. Remove or "
+                f"repair them, or delete them so Autiobooks can download "
+                f"its own copy into {BIN_DIR}.")
+
+        try:
+            if Path(found).resolve().is_relative_to(BIN_DIR.resolve()):
+                Path(found).unlink(missing_ok=True)
+                if found_probe:
+                    try:
+                        if Path(found_probe).resolve().is_relative_to(
+                                BIN_DIR.resolve()):
+                            Path(found_probe).unlink(missing_ok=True)
+                    except (OSError, ValueError):
+                        pass
+            else:
+                reason = 'do not run' if not ffmpeg_ok else 'ffprobe is missing or does not run'
+                _report_broken_ffmpeg(reason)
+                return False
+        except (OSError, ValueError):
+            _report_broken_ffmpeg('do not run and could not be removed')
+            return False
 
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -150,6 +251,9 @@ def ensure_ffmpeg(root=None, progress_callback=None):
         dialog.resizable(False, False)
         dialog.transient(root)
         dialog.grab_set()
+        # No cancel support for this download — ignore the window X so a
+        # click can't destroy the dialog under the polling callback.
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
 
         label = tk.Label(dialog, text="FFmpeg not found. Downloading (~150MB)...")
         label.pack(pady=10)
@@ -164,16 +268,56 @@ def ensure_ffmpeg(root=None, progress_callback=None):
 
         result_holder = [None]
         error_holder = [None]
+        progress_holder = [0, 0]  # downloaded, total — fed from the thread
+
+        def _on_progress(downloaded, total):
+            progress_holder[0] = downloaded
+            progress_holder[1] = total
 
         def download_thread():
             try:
                 tmp_dir = Path(tempfile.gettempdir()) / 'autiobooks_download'
                 tmp_dir.mkdir(exist_ok=True)
                 zip_path = tmp_dir / 'ffmpeg.zip'
+                part_path = tmp_dir / 'ffmpeg.zip.part'
 
-                _download_file(FFMPEG_URL, zip_path)
+                # Same pattern as _download_cuda_runtime.fetch_and_validate:
+                # download to a .part file (so a truncated/killed download
+                # never leaves a corrupt file at the name _extract_zip
+                # trusts), validate the zip's central directory with
+                # testzip(), then os.replace into place. One retry on a
+                # transient network failure before giving up.
+                def fetch_and_validate():
+                    if part_path.exists():
+                        try:
+                            part_path.unlink()
+                        except OSError:
+                            pass
+                    _download_file(FFMPEG_URL, part_path,
+                                   progress_callback=_on_progress)
+                    try:
+                        with zipfile.ZipFile(part_path, 'r') as zf:
+                            bad = zf.testzip()
+                            if bad is not None:
+                                raise zipfile.BadZipFile(
+                                    f"Corrupt entry: {bad}")
+                    except zipfile.BadZipFile:
+                        try:
+                            part_path.unlink()
+                        except OSError:
+                            pass
+                        raise
+                    if zip_path.exists():
+                        try:
+                            zip_path.unlink()
+                        except OSError:
+                            pass
+                    os.replace(part_path, zip_path)
 
-                dialog.attributes('-topmost', False)
+                try:
+                    fetch_and_validate()
+                except (IOError, zipfile.BadZipFile, URLError):
+                    fetch_and_validate()
 
                 _extract_zip(zip_path, BIN_DIR)
 
@@ -181,7 +325,13 @@ def ensure_ffmpeg(root=None, progress_callback=None):
                 if exe_path and exe_path.parent != BIN_DIR:
                     for f in exe_path.parent.iterdir():
                         if f.is_file():
-                            shutil.copy2(f, BIN_DIR / f.name)
+                            # .tmp + os.replace per file, same as
+                            # _extract_zip — a kill mid-flatten previously
+                            # left this step non-atomic, the one gap in an
+                            # otherwise all-atomic extraction pipeline.
+                            tmp_copy = BIN_DIR / (f.name + '.tmp')
+                            shutil.copy2(f, tmp_copy)
+                            os.replace(tmp_copy, BIN_DIR / f.name)
                     shutil.rmtree(exe_path.parent)
 
                 try:
@@ -190,6 +340,20 @@ def ensure_ffmpeg(root=None, progress_callback=None):
                     pass
 
                 ensure_bin_in_path()
+                # A kill mid-extract leaves a partial exe that passes the
+                # existence check forever — verify the binaries actually
+                # run. ffprobe is validated alongside ffmpeg since engine.py
+                # calls it just as often (chapter/duration probing).
+                check = subprocess.run(
+                    [str(BIN_DIR / 'ffmpeg.exe'), '-version'],
+                    capture_output=True, timeout=15, **_SUBPROCESS_FLAGS)
+                probe_check = subprocess.run(
+                    [str(BIN_DIR / 'ffprobe.exe'), '-version'],
+                    capture_output=True, timeout=15, **_SUBPROCESS_FLAGS)
+                if check.returncode != 0 or probe_check.returncode != 0:
+                    raise RuntimeError(
+                        f'ffmpeg/ffprobe were extracted but fail to run; '
+                        f'delete {BIN_DIR} and retry')
                 result_holder[0] = True
             except Exception as e:
                 error_holder[0] = str(e)
@@ -197,6 +361,12 @@ def ensure_ffmpeg(root=None, progress_callback=None):
 
         def update_progress():
             if result_holder[0] is None:
+                downloaded, total = progress_holder
+                if total:
+                    progress['value'] = downloaded / total * 100
+                    status_label.config(
+                        text=f"Downloaded {downloaded / 1048576:.0f} MB / "
+                             f"{total / 1048576:.0f} MB")
                 dialog.after(200, update_progress)
             elif result_holder[0] == True:
                 dialog.destroy()
@@ -208,7 +378,7 @@ def ensure_ffmpeg(root=None, progress_callback=None):
                     messagebox.showerror("Download Error", error_holder[0])
 
         import threading as _threading
-        t = _threading.Thread(target=download_thread)
+        t = _threading.Thread(target=download_thread, daemon=True)
         t.start()
 
         update_progress()
@@ -219,40 +389,21 @@ def ensure_ffmpeg(root=None, progress_callback=None):
     return show_download_dialog()
 
 
-def ensure_espeakng():
-    """Ensure espeak-ng is available. Downloads if needed.
-    
-    Returns:
-        True if espeak-ng is available, False otherwise
+class _CudaDownloadCancelled(Exception):
+    """Raised inside the CUDA download loop when the user clicks Cancel."""
+
+
+def _torch_cuda_capable():
+    """True when the installed torch was built WITH the CUDA backend.
+
+    CPU-only wheels (pip's default on Windows, and our CPU build which
+    installs from the /whl/cpu index) have torch.version.cuda == None —
+    downloaded CUDA DLLs can never activate for them, so offering the
+    2.5GB runtime download would be a guaranteed no-op.
     """
-    ensure_bin_in_path()
-
-    if which_exe('espeak-ng'):
-        return True
-
     try:
-        tmp_dir = Path(tempfile.gettempdir()) / 'autiobooks_download'
-        tmp_dir.mkdir(exist_ok=True)
-        zip_path = tmp_dir / 'espeak-ng.zip'
-
-        _download_file(ESPEAK_URL, zip_path)
-
-        _extract_zip(zip_path, BIN_DIR)
-
-        exe_path = _find_exe_in_dir(BIN_DIR, 'espeak-ng.exe')
-        if exe_path and exe_path.parent != BIN_DIR:
-            for f in exe_path.parent.iterdir():
-                if f.is_file():
-                    shutil.copy2(f, BIN_DIR / f.name)
-            shutil.rmtree(exe_path.parent)
-
-        try:
-            os.unlink(zip_path)
-        except OSError:
-            pass
-
-        ensure_bin_in_path()
-        return True
+        import torch
+        return torch.version.cuda is not None
     except Exception:
         return False
 
@@ -270,11 +421,19 @@ def check_nvidia_gpu():
 
 
 def _cuda_installed():
-    """Check if CUDA DLLs are installed in user directory."""
+    """Check if CUDA DLLs are FULLY installed in the user directory.
+
+    Requires the completion marker written as the last step of extraction:
+    the per-DLL writes are individually atomic, but a kill/crash/power-loss
+    mid-extraction could leave the sentinel DLLs present with later ones
+    missing — a state that passed this check forever ("CUDA Already
+    Installed") while torch.cuda stayed unavailable, with no repair path
+    short of manually deleting ~/.autiobooks/cuda."""
     cuda_bin = CUDA_DIR / 'bin'
     if not cuda_bin.exists():
         return False
-    
+    if not (cuda_bin / _CUDA_COMPLETE_MARKER).exists():
+        return False
     required_dlls = ['cublas64_12.dll', 'cudnn64_9.dll', 'cudart64_12.dll']
     for dll in required_dlls:
         if not (cuda_bin / dll).exists():
@@ -341,6 +500,12 @@ def _ask_user_download_cuda(root, allow_dont_ask=True):
         dialog.destroy()
     
     def on_no():
+        # 'Don't ask again' must work with No — that's its natural pairing
+        # (decline and stop nagging). Previously only Yes honored it.
+        if dont_ask_var.get():
+            config = load_config()
+            config['cuda_download_opted_out'] = True
+            save_config(config)
         result_holder[0] = False
         dialog.destroy()
     
@@ -353,7 +518,8 @@ def _ask_user_download_cuda(root, allow_dont_ask=True):
     return result_holder[0] if result_holder[0] is not None else False
 
 
-def _download_cuda_runtime(cuda_dir, progress_callback=None):
+def _download_cuda_runtime(cuda_dir, progress_callback=None,
+                           cancel_event=None):
     """Download CUDA runtime DLLs from torch wheel.
 
     Downloads atomically: writes to a .part file and renames on success, so an
@@ -361,6 +527,9 @@ def _download_cuda_runtime(cuda_dir, progress_callback=None):
     complete one. The downloaded zip is validated before extraction; if
     validation fails (network corruption, truncation), the download is retried
     once before giving up.
+
+    `cancel_event` is polled between chunks; when set, the download aborts
+    with _CudaDownloadCancelled (never retried).
     """
     import tempfile
     import zipfile
@@ -383,6 +552,8 @@ def _download_cuda_runtime(cuda_dir, progress_callback=None):
             block_size = 8192
             with open(dest, 'wb') as f:
                 while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise _CudaDownloadCancelled()
                     buffer = response.read(block_size)
                     if not buffer:
                         break
@@ -427,18 +598,42 @@ def _download_cuda_runtime(cuda_dir, progress_callback=None):
     except (IOError, zipfile.BadZipFile, URLError):
         fetch_and_validate()
 
+    # Invalidate any previous complete install before touching its DLLs —
+    # if this (re)extraction dies partway, _cuda_installed() must not keep
+    # reporting the old marker against a now-mixed DLL set.
+    marker_path = cuda_bin / _CUDA_COMPLETE_MARKER
+    try:
+        marker_path.unlink()
+    except OSError:
+        pass
+
     with zipfile.ZipFile(whl_path, 'r') as zf:
         for name in zf.namelist():
             if name.startswith('torch/lib/') and name.endswith('.dll'):
+                # Cancel used to be polled only in the download chunk loop;
+                # during this multi-GB extraction the Cancel button closed
+                # the dialog while a zombie thread kept extracting (and
+                # raced a retry over the same temp paths).
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _CudaDownloadCancelled()
                 filename = Path(name).name
                 if any(cuda_dll in name for cuda_dll in [
                     'cublas', 'cudnn', 'cudart', 'cufft', 'curand',
                     'cusolver', 'nccl', 'nvjit'
                 ]):
                     out_path = cuda_bin / filename
-                    if not out_path.exists():
-                        with zf.open(name) as src, open(out_path, 'wb') as dst:
-                            dst.write(src.read())
+                    # Always (re)write via a temp file: a kill mid-extract
+                    # previously left a truncated DLL that passed the
+                    # existence check forever and crashed torch at load.
+                    tmp_path = cuda_bin / (filename + '.tmp')
+                    with zf.open(name) as src, open(tmp_path, 'wb') as dst:
+                        dst.write(src.read())
+                    os.replace(tmp_path, out_path)
+
+    # LAST step: the marker that lets _cuda_installed() trust the DLL set.
+    marker_tmp = cuda_bin / (_CUDA_COMPLETE_MARKER + '.tmp')
+    marker_tmp.write_text('ok', encoding='utf-8')
+    os.replace(marker_tmp, marker_path)
 
     try:
         whl_path.unlink()
@@ -472,11 +667,16 @@ def _show_cuda_download_dialog(root, progress_callback=None):
 
     dialog.update_idletasks()
 
+    import threading
     result_holder = {'cancelled': False, 'error': None, 'done': False, 'downloaded': 0, 'total': 0}
+    cancel_event = threading.Event()
 
     def download_thread():
         try:
-            _download_cuda_runtime(CUDA_DIR, lambda d, t: _update_progress(d, t))
+            _download_cuda_runtime(CUDA_DIR, lambda d, t: _update_progress(d, t),
+                                   cancel_event=cancel_event)
+        except _CudaDownloadCancelled:
+            pass
         except Exception as e:
             result_holder['error'] = str(e)
         finally:
@@ -487,6 +687,10 @@ def _show_cuda_download_dialog(root, progress_callback=None):
         result_holder['total'] = total
 
     def on_cancel():
+        # Signal the download loop AND release the UI immediately — the
+        # thread may be blocked in a socket read, so the dialog must not
+        # wait for it (daemon thread; it aborts at the next chunk).
+        cancel_event.set()
         result_holder['cancelled'] = True
         result_holder['done'] = True
 
@@ -494,20 +698,34 @@ def _show_cuda_download_dialog(root, progress_callback=None):
                             style='Cancel.TButton')
     cancel_btn.pack(pady=5)
 
-    import threading
-    t = threading.Thread(target=download_thread)
+    # Closing via the window X must behave like Cancel — without this the
+    # destroyed Toplevel crashed the old update() busy-loop with TclError.
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    t = threading.Thread(target=download_thread, daemon=True)
     t.start()
 
-    while not result_holder['done']:
+    def _poll():
+        if result_holder['done']:
+            dialog.destroy()
+            return
         if result_holder['total'] > 0:
             progress['maximum'] = result_holder['total']
             progress['value'] = result_holder['downloaded']
-            status_label.config(text=f"Downloaded {result_holder['downloaded'] / 1024 / 1024:.1f} MB / {result_holder['total'] / 1024 / 1024:.1f} MB")
-        dialog.update()
-        dialog.after(50)
+            status_label.config(
+                text=f"Downloaded "
+                     f"{result_holder['downloaded'] / 1024 / 1024:.1f} MB / "
+                     f"{result_holder['total'] / 1024 / 1024:.1f} MB")
+        dialog.after(100, _poll)
 
-    dialog.destroy()
-    t.join()
+    _poll()
+    dialog.wait_window()
+
+    if not result_holder['cancelled']:
+        # Normal completion: the thread has already finished (it set 'done'
+        # itself); join is instant. On cancel we never block the main
+        # thread on a possibly-stalled socket read.
+        t.join(timeout=30)
 
     if result_holder['cancelled']:
         return False, "Download cancelled"
@@ -518,16 +736,45 @@ def _show_cuda_download_dialog(root, progress_callback=None):
 
 def download_cuda_from_menu(root, gpu_acceleration_var=None):
     """Download CUDA from Tools menu - bypasses 'Don't ask again' preference."""
+    if not _torch_cuda_capable():
+        from tkinter import messagebox
+        messagebox.showinfo(
+            "CPU-only build",
+            "This installation uses CPU-only torch, which cannot use the "
+            "CUDA runtime even after downloading it.\n\nUse the CUDA build "
+            "of Autiobooks for GPU acceleration.")
+        return False
     if not check_nvidia_gpu():
         from tkinter import messagebox
         messagebox.showinfo("No GPU Detected", "No NVIDIA GPU found. CUDA download not needed.")
         return False
 
+    # A working install answers here regardless of the marker file (legacy
+    # installs predate it). Only when torch can't actually use the GPU do
+    # we fall through to (re)download — a partial extraction that used to
+    # wedge as "Already Installed" now gets a repair path.
+    _add_cuda_to_path()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            if gpu_acceleration_var:
+                gpu_acceleration_var.set(True)
+            from tkinter import messagebox
+            messagebox.showinfo("CUDA Already Installed",
+                                "CUDA runtime is already installed and "
+                                "active.")
+            return True
+    except Exception:
+        pass
+
     if _cuda_installed():
-        _add_cuda_to_path()
         from tkinter import messagebox
-        messagebox.showinfo("CUDA Already Installed", "CUDA runtime is already installed.")
-        return True
+        if not messagebox.askyesno(
+                "CUDA Installed But Inactive",
+                "The CUDA runtime is installed but the GPU is not "
+                "available (drivers, or a broken install).\n\n"
+                "Re-download the CUDA runtime?"):
+            return False
 
     success, error = _show_cuda_download_dialog(root)
 
@@ -569,12 +816,17 @@ def ensure_cuda(root=None, progress_callback=None):
     except Exception:
         pass
     
+    # CPU-only torch can never use the DLLs — don't prompt for a 2.5GB
+    # download that cannot activate.
+    if not _torch_cuda_capable():
+        return False
+
     if not check_nvidia_gpu():
         return False
-    
+
     if _cuda_installed():
         return True
-    
+
     if not _ask_user_download_cuda(root):
         return False
     
@@ -593,23 +845,7 @@ def ensure_cuda(root=None, progress_callback=None):
     return False
 
 
-def check_ffmpeg():
-    """Quick check if ffmpeg is in PATH."""
-    ensure_bin_in_path()
-    return which_exe('ffmpeg')
-
-
-def check_espeakng():
-    """Quick check if espeak-ng is in PATH."""
-    ensure_bin_in_path()
-    return which_exe('espeak-ng')
-
-
-def check_cuda():
-    """Check if CUDA is available for torch."""
-    _add_cuda_to_path()
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except Exception:
-        return False
+# NOTE: espeak-ng needs no runtime download/ensure step — misaki's espeak
+# module loads the library through the bundled `espeakng_loader` package
+# (see autiobooks/misaki/espeak.py), so the old ensure_espeakng/check_*
+# helpers were dead code and have been removed.

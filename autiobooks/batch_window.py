@@ -9,20 +9,72 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .engine import (
     _INTERMEDIATE_EXTS,
-    chapter_wav_name,
-    concat_audio_files,
+    assemble_output,
     convert_chapters_to_wav,
-    create_m4b,
+    end_conversion,
+    find_chapter_wavs,
     safe_stem,
     set_gpu_acceleration,
+    try_begin_conversion,
     unlink_with_retry,
 )
 from .epub_parser import get_cover_image
+from .pdf_parser import get_pdf_cover_bytes
 from .voices_lang import deemojify_voice
 
 
 def _final_ext(fmt):
     return '.m4b' if fmt == 'm4b' else _INTERMEDIATE_EXTS.get(fmt, '.m4b')
+
+
+# Run state shared across batch-window instances. A worker can outlive its
+# window (closing the window cancels at the next chapter boundary, which
+# can be minutes away on CPU) — a reopened window must adopt the live
+# cancel event and running index, or its row gating and Cancel button
+# would be wired to dead per-window objects.
+_batch_cancel = threading.Event()
+_current_running_idx = [-1]
+
+# Serializes batch_queue mutation against the worker's claim-then-fetch:
+# the main thread's _is_pending check and pop/swap were not atomic with the
+# worker advancing _current_running_idx and fetching the job, so a Remove
+# landing exactly at a job boundary could pop the job the worker had just
+# committed to (and silently skip the job that shifted into its slot).
+_queue_lock = threading.Lock()
+
+# UI hooks of the CURRENTLY-live batch window. The worker posts updates
+# through these instead of closing over its spawning window's widgets, so
+# a window reopened mid-run (or during the cancel drain) keeps receiving
+# status/progress/completion updates. Entries are replaced wholesale each
+# time a window opens; safe_after guards against the window being gone.
+_ui = {}
+
+# The single live Batch Queue Toplevel, or None. show_batch_window() is a
+# singleton: a second call while one is already open just raises the
+# existing window instead of creating a competitor that steals `_ui` out
+# from under it and can cancel a run it doesn't own (see on_close).
+_window = None
+
+
+def _ui_post(name, *args):
+    """Post a named UI update to whichever batch window is currently live.
+
+    No-op when no window has registered or the registered window has been
+    destroyed (its safe_after checks winfo_exists)."""
+    sa = _ui.get('safe_after')
+    fn = _ui.get(name)
+    if sa is None or fn is None:
+        return
+    sa(0, lambda f=fn, a=args: f(*a))
+
+
+def cancel_active_batch():
+    """Signal a running batch worker to stop at the next chapter boundary.
+
+    Called from the main window's quit path — its own cancel_event is for
+    the GUI conversion only and a batch worker never polls it.
+    """
+    _batch_cancel.set()
 
 
 def show_batch_window(
@@ -34,6 +86,7 @@ def show_batch_window(
     get_substitutions,
     get_phoneme_overrides=None,
     get_auto_acronyms=None,
+    is_preview_active=None,
 ):
     """Open the batch queue window.
 
@@ -45,6 +98,23 @@ def show_batch_window(
     get_phoneme_overrides: callable returning the current phoneme override list.
     get_auto_acronyms: callable returning the current auto-acronym bool.
     """
+    global _window
+    if _window is not None:
+        try:
+            if _window.winfo_exists():
+                # Already open (possibly mid-run) — raise it instead of
+                # opening a second Toplevel. A second window used to steal
+                # `_ui` wholesale (window A's progress/status/completion
+                # updates then went nowhere) and could cancel a run window
+                # A started the moment it was closed.
+                _window.deiconify()
+                _window.lift()
+                _window.focus_force()
+                return
+        except tk.TclError:
+            pass
+        _window = None
+
     if not batch_queue:
         messagebox.showinfo(
             "Batch Queue",
@@ -54,6 +124,7 @@ def show_batch_window(
         return
 
     bw = tk.Toplevel(parent)
+    _window = bw
     bw.title("Batch Queue")
     bw.geometry("800x500")
     bw.resizable(True, True)
@@ -116,8 +187,9 @@ def show_batch_window(
     last_queue_snapshot = [()]
     # -1 when no batch is running; otherwise the index in batch_queue of the
     # job currently being processed. Used to gate move/remove on pending
-    # rows only and to visually mark the running row.
-    current_running_idx = [-1]
+    # rows only and to visually mark the running row. Module-level so a
+    # window reopened during a cancel drain sees the live run.
+    current_running_idx = _current_running_idx
 
     _default_font = tkfont.nametofont('TkDefaultFont')
     _running_font = tkfont.Font(family=_default_font.cget('family'),
@@ -141,17 +213,21 @@ def show_batch_window(
                 f"{sel}/{total}",
                 f"{job.total_words:,}",
                 job.status))
-        last_queue_snapshot[0] = tuple(id(j) for j in batch_queue)
+        last_queue_snapshot[0] = tuple(
+            (id(j), j.status) for j in batch_queue)
 
     refresh_treeview()
 
     # Poll for external mutations (e.g. main window's "Add to Batch" while
     # this window is open). The queue is shared mutable state with no
-    # notify channel; cheapest reliable signal is the identity tuple.
+    # notify channel; the snapshot includes per-job status so a window
+    # reopened mid-run re-renders as the worker advances, not only when
+    # queue membership changes.
     def poll_queue_changes():
         if not bw.winfo_exists():
             return
-        if tuple(id(j) for j in batch_queue) != last_queue_snapshot[0]:
+        snap = tuple((id(j), j.status) for j in batch_queue)
+        if snap != last_queue_snapshot[0]:
             refresh_treeview()
         bw.after(500, poll_queue_changes)
 
@@ -171,11 +247,14 @@ def show_batch_window(
             return
         idx = tree.index(sel[0])
         # Need both source and target (idx-1) to be pending. When running,
-        # that means idx must be at least 2 past the running index.
-        if idx <= 0 or not _is_pending(idx) or not _is_pending(idx - 1):
-            return
-        batch_queue[idx], batch_queue[idx - 1] = (
-            batch_queue[idx - 1], batch_queue[idx])
+        # that means idx must be at least 2 past the running index. The
+        # lock makes the pending-check + swap atomic against the worker's
+        # claim-then-fetch at a job boundary.
+        with _queue_lock:
+            if idx <= 0 or not _is_pending(idx) or not _is_pending(idx - 1):
+                return
+            batch_queue[idx], batch_queue[idx - 1] = (
+                batch_queue[idx - 1], batch_queue[idx])
         refresh_treeview()
         tree.selection_set(tree.get_children()[idx - 1])
 
@@ -184,10 +263,11 @@ def show_batch_window(
         if not sel:
             return
         idx = tree.index(sel[0])
-        if idx >= len(batch_queue) - 1 or not _is_pending(idx):
-            return
-        batch_queue[idx], batch_queue[idx + 1] = (
-            batch_queue[idx + 1], batch_queue[idx])
+        with _queue_lock:
+            if idx >= len(batch_queue) - 1 or not _is_pending(idx):
+                return
+            batch_queue[idx], batch_queue[idx + 1] = (
+                batch_queue[idx + 1], batch_queue[idx])
         refresh_treeview()
         tree.selection_set(tree.get_children()[idx + 1])
 
@@ -196,9 +276,10 @@ def show_batch_window(
         if not sel:
             return
         idx = tree.index(sel[0])
-        if not _is_pending(idx):
-            return
-        batch_queue.pop(idx)
+        with _queue_lock:
+            if not _is_pending(idx) or idx >= len(batch_queue):
+                return
+            batch_queue.pop(idx)
         refresh_treeview()
         if not batch_queue and current_running_idx[0] < 0:
             bw.destroy()
@@ -214,7 +295,8 @@ def show_batch_window(
                     f"Remove {pending_count} pending job(s) from the queue?\n"
                     "The currently-running job will continue.",
                     parent=bw):
-                del batch_queue[current_running_idx[0] + 1:]
+                with _queue_lock:
+                    del batch_queue[current_running_idx[0] + 1:]
                 refresh_treeview()
             return
         if messagebox.askyesno("Clear All",
@@ -262,7 +344,7 @@ def show_batch_window(
     action_frame = tk.Frame(bw)
     action_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
 
-    batch_cancel = threading.Event()
+    batch_cancel = _batch_cancel
 
     def start_batch():
         output_dir = dir_var.get().strip()
@@ -277,38 +359,90 @@ def show_batch_window(
                                    parent=bw)
             return
 
-        start_btn.configure(state='disabled')
-        cancel_btn.configure(state='normal')
-        batch_cancel.clear()
+        # One conversion at a time process-wide: the main-window convert flow
+        # and a still-finishing batch worker (this window may have been
+        # closed and reopened mid-run) share global GPU state and WAV paths.
+        if is_preview_active and is_preview_active():
+            # The preview thread is inside the shared TTS pipeline; the
+            # batch worker's set_gpu_acceleration() would flip the
+            # process-global torch device under it.
+            messagebox.showwarning(
+                "Warning",
+                "Wait for the chapter preview to finish generating first.",
+                parent=bw)
+            return
 
-        user_gpu_pref = None
-        gpu_var = prefs.get('gpu_acceleration')
-        if gpu_var is not None:
+        # Jobs left at "Done" by a run whose window was closed before the
+        # completion summary could prune them: converting them again would
+        # re-TTS from scratch (WAVs are cleaned on success) and overwrite
+        # the previous output with regenerated content. Prune them now.
+        # "Done (N ch failed)" jobs are kept — re-running those is a retry.
+        with _queue_lock:
+            leftover_done = [j for j in batch_queue if j.status == "Done"]
+            for j in leftover_done:
+                batch_queue.remove(j)
+        if leftover_done:
+            refresh_treeview()
+        if not batch_queue:
+            messagebox.showinfo(
+                "Batch Queue",
+                "All queued jobs were already converted.", parent=bw)
+            return
+
+        if not try_begin_conversion():
+            messagebox.showwarning(
+                "Warning",
+                "Another conversion is already running (main window or a "
+                "previous batch still finishing). Wait for it to complete.",
+                parent=bw)
+            return
+
+        # Everything between the slot claim above and the worker spawn at
+        # the bottom runs under a try/except that releases the slot — an
+        # exception here (a Tk read, a snapshot copy) would otherwise leak
+        # the conversion lock for the rest of the session.
+        try:
+            start_btn.configure(state='disabled')
+            cancel_btn.configure(state='normal')
+            batch_cancel.clear()
+
+            user_gpu_pref = None
+            gpu_var = prefs.get('gpu_acceleration')
+            if gpu_var is not None:
+                try:
+                    user_gpu_pref = bool(gpu_var.get())
+                except tk.TclError:
+                    user_gpu_pref = None
+
+            # Snapshot Tk-held prefs and the substitution/override lists on
+            # the main thread — the batch worker must not read Tk variables,
+            # and a mid-run prefs change shouldn't alter later jobs.
+            heteronyms_pref = bool(prefs['heteronyms'].get())
+            contractions_pref = bool(prefs['contractions'].get())
+            auto_acronyms_pref = bool(get_auto_acronyms()) if get_auto_acronyms else False
+            subs_snapshot = [dict(s) for s in (get_substitutions() or [])]
+            overrides_snapshot = ([dict(o) for o in (get_phoneme_overrides() or [])]
+                                  if get_phoneme_overrides else None)
+        except Exception:
+            end_conversion()
             try:
-                user_gpu_pref = bool(gpu_var.get())
+                start_btn.configure(state='normal')
+                cancel_btn.configure(state='disabled')
             except tk.TclError:
-                user_gpu_pref = None
+                pass
+            raise
 
         def run():
-            def _restore_buttons():
-                if not bw.winfo_exists():
-                    return
-                try:
-                    start_btn.configure(state='normal')
-                    cancel_btn.configure(state='disabled')
-                except tk.TclError:
-                    pass
-
+            # All worker→UI traffic goes through _ui_post so a batch window
+            # reopened mid-run (the module-level _ui holder then points at
+            # the NEW window) keeps receiving updates — closures over this
+            # window's widgets would go dark the moment it was closed.
             try:
                 _run_body()
             except Exception as e:
                 print(f"Batch run crashed: {e}", file=sys.stderr)
                 traceback.print_exc()
-                safe_after(0, lambda err=str(e):
-                           messagebox.showerror(
-                               "Batch Error",
-                               f"Batch run crashed:\n\n{err}",
-                               parent=bw))
+                _ui_post('show_error', f"Batch run crashed:\n\n{e}")
             finally:
                 current_running_idx[0] = -1
                 if user_gpu_pref is not None:
@@ -317,21 +451,29 @@ def show_batch_window(
                     except Exception as gpu_err:
                         print(f"Failed to restore GPU state: {gpu_err}",
                               file=sys.stderr)
-                safe_after(0, _restore_buttons)
-                safe_after(0, refresh_treeview)
+                end_conversion()
+                _ui_post('set_buttons', False)
+                _ui_post('refresh')
 
         def _run_body():
-            total_jobs = len(batch_queue)
             jobs_completed = 0
             jobs_failed = 0
             failed_jobs = []
+            # Jobs that completed but with individual chapter failures —
+            # the output exists yet is MISSING those chapters; stderr alone
+            # is invisible in a windowed build, so these must reach the UI.
+            chapter_failure_jobs = []
             used_output_paths = set()
 
             def _resolve_collision(path):
                 """Return a path that doesn't collide with anything already
                 claimed this batch. Appends ' (2)', ' (3)', ... before the
                 extension when needed. Uses casefold for case-insensitive
-                filesystems (Windows/macOS default)."""
+                filesystems (Windows/macOS default).
+
+                Deliberately does NOT check the filesystem: re-converting a
+                book to the same directory overwrites the previous output,
+                matching CLI -o semantics (user decision, audit §4.5)."""
                 p = Path(path)
                 candidate = p
                 n = 2
@@ -342,12 +484,10 @@ def show_batch_window(
                 return str(candidate)
 
             def set_bprog(value):
-                safe_after(0, lambda v=value:
-                           batch_progress.configure(value=v))
+                _ui_post('set_progress', value)
 
             def set_bstat(text):
-                safe_after(0, lambda t=text:
-                           batch_status.config(text=t))
+                _ui_post('set_status', text)
 
             def _cleanup_files(paths):
                 for p in paths:
@@ -356,24 +496,42 @@ def show_batch_window(
                         print(f'failed to delete {p}: {err}',
                               file=sys.stderr)
 
-            for job_idx, job in enumerate(batch_queue):
+            job_idx = -1
+            while True:
+                # Claim the next slot BEFORE fetching the job: the main
+                # thread's _is_pending gating treats idx > current_running_idx
+                # as removable, so advancing the index first closes the window
+                # where Remove could pop a job the worker is committed to.
+                # len() is re-read each iteration so jobs appended from the
+                # main window mid-run are picked up and the [n/total] prefix
+                # and percent math stay within bounds.
+                with _queue_lock:
+                    job_idx += 1
+                    current_running_idx[0] = job_idx
+                    if job_idx >= len(batch_queue):
+                        break
+                    job = batch_queue[job_idx]
+                if job.status == "Done":
+                    # Converted by an earlier run whose window closed before
+                    # the summary pruned it — don't re-TTS and overwrite.
+                    continue
                 if batch_cancel.is_set():
                     job.status = "Cancelled"
-                    safe_after(0, refresh_treeview)
+                    _ui_post('refresh')
                     break
 
-                current_running_idx[0] = job_idx
                 job.status = "Converting"
-                safe_after(0, refresh_treeview)
+                _ui_post('refresh')
 
+                total_jobs = len(batch_queue)
                 job_start_pct = (job_idx / total_jobs) * 100
                 job_end_pct = ((job_idx + 1) / total_jobs) * 100
                 prefix = f"[{job_idx + 1}/{total_jobs}]"
 
                 encode_executor = None
                 conversion_success = False
-                all_wav = []
                 all_enc = []
+                chapter_errors = []
                 try:
                     selected_chapters = [
                         job.chapters[i]
@@ -406,8 +564,10 @@ def show_batch_window(
                     total_words = sum(word_counts) or 1
                     eta_state = {'words_done': 0,
                                  'start_time': time.time(),
-                                 'current_step': 0}
+                                 'current_step': 0,
+                                 'words_remaining': total_words}
                     steps = n_selected + 1
+                    resumed_indices = set()
 
                     # Prepare chapter texts (title/author prepend on ch 1)
                     chapter_texts = []
@@ -417,9 +577,6 @@ def show_batch_window(
                             text = f"{title} by {creator}.\n{text}"
                         chapter_texts.append(text)
 
-                    all_wav = [chapter_wav_name(stem, t, wav_dir)
-                               for t in chapter_texts]
-
                     def _eta_str():
                         elapsed = time.time() - eta_state['start_time']
                         if eta_state['words_done'] <= 0 or elapsed <= 0:
@@ -427,8 +584,7 @@ def show_batch_window(
                         wps = eta_state['words_done'] / elapsed
                         if wps <= 0:
                             return ''
-                        remaining = (
-                            (total_words - eta_state['words_done']) / wps)
+                        remaining = eta_state['words_remaining'] / wps
                         if remaining >= 60:
                             return f" (~{int(remaining / 60)} min left)"
                         return f" (~{int(remaining)}s left)"
@@ -439,6 +595,13 @@ def show_batch_window(
 
                     def on_chapter_start(i, total, text, is_resume):
                         if is_resume:
+                            resumed_indices.add(i)
+                            # Resumed-from-disk / duplicate-reuse chapters
+                            # cost ~0 wall clock — drop them from the
+                            # remaining-work total immediately so the
+                            # words/sec rate isn't computed against
+                            # instantaneous "free" progress.
+                            eta_state['words_remaining'] -= word_counts[i - 1]
                             set_bstat(
                                 f"{prefix} {stem}: skipping ch {i} "
                                 f"(already done)")
@@ -455,7 +618,13 @@ def show_batch_window(
                         set_bprog(ch_s + frac * (ch_e - ch_s))
 
                     def on_chapter_done(i, duration):
-                        eta_state['words_done'] += word_counts[i - 1]
+                        # Resumed/duplicate chapters already had their
+                        # words dropped from words_remaining in
+                        # on_chapter_start; crediting them here too would
+                        # double count and re-poison the words/sec rate.
+                        if i not in resumed_indices:
+                            eta_state['words_done'] += word_counts[i - 1]
+                            eta_state['words_remaining'] -= word_counts[i - 1]
                         eta_state['current_step'] += 1
                         set_bprog(_job_pct(
                             eta_state['current_step'] / steps))
@@ -463,8 +632,16 @@ def show_batch_window(
                     def on_chapter_error(i, exc):
                         print(f"{stem} ch {i} failed: {exc}",
                               file=sys.stderr)
+                        # Surfaced in the job status and completion summary
+                        # — stderr is invisible in the windowed build, and a
+                        # job with missing chapters must not read as a
+                        # clean "Done".
+                        chapter_errors.append((i, str(exc)))
                         eta_state['words_done'] += word_counts[i - 1]
+                        eta_state['words_remaining'] -= word_counts[i - 1]
                         eta_state['current_step'] += 1
+                        set_bprog(_job_pct(
+                            eta_state['current_step'] / steps))
 
                     encode_executor = ThreadPoolExecutor(max_workers=1)
                     result = convert_chapters_to_wav(
@@ -474,13 +651,11 @@ def show_batch_window(
                         bitrate=job.bitrate,
                         vbr=job.vbr,
                         chapter_gap=chapter_gap,
-                        substitutions=get_substitutions(),
-                        phoneme_overrides=(get_phoneme_overrides()
-                                           if get_phoneme_overrides else None),
-                        auto_acronyms=(get_auto_acronyms()
-                                       if get_auto_acronyms else False),
-                        heteronyms=prefs['heteronyms'].get(),
-                        contractions=prefs['contractions'].get(),
+                        substitutions=subs_snapshot,
+                        phoneme_overrides=overrides_snapshot,
+                        auto_acronyms=auto_acronyms_pref,
+                        heteronyms=heteronyms_pref,
+                        contractions=contractions_pref,
                         resume=True,
                         cancel_check=batch_cancel.is_set,
                         on_chapter_start=on_chapter_start,
@@ -497,7 +672,7 @@ def show_batch_window(
 
                     if result['cancelled']:
                         job.status = "Cancelled"
-                        safe_after(0, refresh_treeview)
+                        _ui_post('refresh')
                         continue
 
                     if not wav_files:
@@ -505,55 +680,47 @@ def show_batch_window(
                         jobs_failed += 1
                         failed_jobs.append(
                             (job.title, "No chapters converted"))
-                        safe_after(0, refresh_treeview)
+                        _ui_post('refresh')
                         continue
 
                     set_bstat(
                         f"{prefix} {stem}: assembling {out_fmt}...")
-                    enc_files = []
-                    for wn in wav_files:
-                        future, enc_name = encode_futures[wn]
-                        future.result()
-                        enc_files.append(enc_name)
-
-                    converted_titles = []
-                    for ci, ch in enumerate(selected_chapters):
-                        wn = chapter_wav_name(
-                            stem, chapter_texts[ci], wav_dir)
-                        if (wn in wav_files
-                                and chapter_titles is not None):
-                            converted_titles.append(
-                                chapter_titles[ci])
 
                     if job.file_path.lower().endswith('.pdf'):
-                        cover_full = None
+                        cover_full = get_pdf_cover_bytes(job.file_path)
                     else:
                         cover_full = get_cover_image(job.book, False)
 
-                    def assembly_prog(pct, s=job_start_pct,
-                                      e=job_end_pct):
-                        set_bprog(s + (pct / 100) * (e - s))
+                    def assembly_prog(pct):
+                        # Map onto the reserved trailing 1/steps slot
+                        # (steps = n_selected + 1) instead of the job's
+                        # full [job_start_pct, job_end_pct] span — the
+                        # latter made the bar snap backward from wherever
+                        # the last chapter left off (up to
+                        # _job_pct(n_selected/steps)) down to
+                        # job_start_pct the instant assembly's first
+                        # -progress line (pct=0) arrived.
+                        set_bprog(_job_pct((steps - 1 + pct / 100) / steps))
 
-                    if out_fmt == 'm4b':
-                        create_m4b(
-                            enc_files, output_path, cover_full,
-                            title, creator, chapter_num,
-                            converted_titles or None,
-                            progress_callback=assembly_prog,
-                            preencoded=True,
-                            bitrate=job.bitrate,
-                            vbr=job.vbr)
+                    assemble_output(result, chapter_texts, chapter_titles,
+                                    stem, wav_dir, out_fmt, output_path,
+                                    cover_full, title, creator,
+                                    starting_chapter=chapter_num,
+                                    bitrate=job.bitrate, vbr=job.vbr,
+                                    progress_callback=assembly_prog)
+
+                    if chapter_errors:
+                        job.status = (
+                            f"Done ({len(chapter_errors)} ch failed)")
+                        chapter_failure_jobs.append(
+                            (job.title, list(chapter_errors)))
                     else:
-                        concat_audio_files(
-                            enc_files, output_path,
-                            progress_callback=assembly_prog)
-
-                    job.status = "Done"
+                        job.status = "Done"
                     jobs_completed += 1
                     conversion_success = True
 
                 except Exception as e:
-                    job.status = f"Failed"
+                    job.status = f"Failed: {e}"
                     jobs_failed += 1
                     failed_jobs.append((job.title, str(e)))
                     print(f"Batch failed: {job.file_path}: {e}",
@@ -563,56 +730,73 @@ def show_batch_window(
                         encode_executor.shutdown(wait=True)
                     # Mirror main-conversion cleanup policy: keep WAVs on
                     # cancel/failure so resume works on the next run;
-                    # always remove encoded intermediates.
-                    if conversion_success and all_wav:
-                        _cleanup_files(all_wav)
+                    # always remove encoded intermediates. The sweep is
+                    # stem-wide (any render_key) so orphans from a run
+                    # cancelled under different settings are reclaimed too.
+                    if conversion_success:
+                        _cleanup_files(find_chapter_wavs(stem, wav_dir))
                     if all_enc:
                         _cleanup_files(all_enc)
-                    safe_after(0, refresh_treeview)
+                    _ui_post('refresh')
 
             batch_cancel.clear()
             current_running_idx[0] = -1
 
-            def show_done():
-                if not bw.winfo_exists():
-                    return
-                set_bprog(100)
-                start_btn.configure(state='normal')
-                cancel_btn.configure(state='disabled')
-                msg = (f"Completed: {jobs_completed}\n"
-                       f"Failed: {jobs_failed}")
-                if failed_jobs:
-                    msg += "\n\nFailed:"
-                    for name, err in failed_jobs:
-                        msg += f"\n  - {name}: {err}"
-                if jobs_failed > 0:
-                    messagebox.showwarning("Batch Complete", msg,
-                                           parent=bw)
-                else:
-                    messagebox.showinfo("Batch Complete", msg,
-                                        parent=bw)
-                for j in list(batch_queue):
-                    if j.status == "Done":
-                        batch_queue.remove(j)
-                refresh_treeview()
-
-            safe_after(0, show_done)
+            msg = (f"Completed: {jobs_completed}\n"
+                   f"Failed: {jobs_failed}")
+            if chapter_failure_jobs:
+                msg += "\n\nCompleted with MISSING chapters:"
+                for name, errs in chapter_failure_jobs:
+                    chs = ', '.join(str(i) for i, _ in errs)
+                    msg += f"\n  - {name}: chapter(s) {chs}"
+                    for i, err in errs[:3]:
+                        msg += f"\n      ch {i}: {err}"
+            if failed_jobs:
+                msg += "\n\nFailed:"
+                for name, err in failed_jobs:
+                    msg += f"\n  - {name}: {err}"
+            warn = jobs_failed > 0 or bool(chapter_failure_jobs)
+            # Routed through the live-window holder: if the user closed and
+            # reopened the window mid-run, the NEW window shows the summary
+            # and prunes Done jobs. With no window open the summary is
+            # skipped; leftover Done jobs are pruned at the next Start.
+            _ui_post('run_finished', msg, warn)
 
         def _batch_with_sleep_prevention():
             with prevent_sleep():
                 run()
-        threading.Thread(target=_batch_with_sleep_prevention,
-                         daemon=True).start()
+        try:
+            threading.Thread(target=_batch_with_sleep_prevention,
+                             daemon=True).start()
+        except Exception:
+            # Slot claimed but no worker exists to release it in its
+            # finally — release here or every later conversion is blocked.
+            end_conversion()
+            try:
+                start_btn.configure(state='normal')
+                cancel_btn.configure(state='disabled')
+            except tk.TclError:
+                pass
+            raise
 
     def cancel_batch():
         batch_cancel.set()
         batch_status.config(text="Cancelling...")
 
     def on_close():
-        """Close-window handler. Signals cancel to any running worker so
-        its pending after() callbacks become no-ops via safe_after(), then
-        destroys the window."""
-        batch_cancel.set()
+        """Close-window handler. Signals cancel to a running worker so its
+        pending after() callbacks become no-ops via safe_after() — but only
+        when THIS window's run is actually live. current_running_idx[0] is
+        -1 whenever no run is in flight (never started, or finished/
+        cancelled already reset it in the worker's finally), so a window
+        that closes after its run ended — or, defensively, a second window
+        that never should have opened at all now that show_batch_window is
+        a singleton — can't cancel a run it doesn't own."""
+        global _window
+        if current_running_idx[0] >= 0:
+            batch_cancel.set()
+        if _window is bw:
+            _window = None
         bw.destroy()
 
     bw.protocol("WM_DELETE_WINDOW", on_close)
@@ -623,3 +807,42 @@ def show_batch_window(
     cancel_btn = ttk.Button(action_frame, text='Cancel',
                             command=cancel_batch, state='disabled')
     cancel_btn.pack(side=tk.RIGHT, padx=5)
+
+    def _set_buttons(running):
+        start_btn.configure(state='disabled' if running else 'normal')
+        cancel_btn.configure(state='normal' if running else 'disabled')
+
+    def _run_finished(msg, warn):
+        batch_progress.configure(value=100)
+        _set_buttons(False)
+        if warn:
+            messagebox.showwarning("Batch Complete", msg, parent=bw)
+        else:
+            messagebox.showinfo("Batch Complete", msg, parent=bw)
+        with _queue_lock:
+            for j in [j for j in batch_queue if j.status == "Done"]:
+                batch_queue.remove(j)
+        refresh_treeview()
+
+    def _show_error(msg):
+        messagebox.showerror("Batch Error", msg, parent=bw)
+
+    # Register this window as the live UI target for the (possibly
+    # already-running) batch worker. Replaces any previous window's hooks —
+    # this is what lets a window reopened mid-run receive status/progress/
+    # completion updates instead of freezing at "Converting".
+    _ui.update(
+        safe_after=safe_after,
+        refresh=refresh_treeview,
+        set_progress=lambda v: batch_progress.configure(value=v),
+        set_status=lambda t: batch_status.config(text=t),
+        set_buttons=_set_buttons,
+        run_finished=_run_finished,
+        show_error=_show_error,
+    )
+
+    # Adopt a run already in flight (window was closed and reopened):
+    # reflect the running state in the buttons and status line.
+    if current_running_idx[0] >= 0:
+        _set_buttons(True)
+        batch_status.config(text="Batch running...")

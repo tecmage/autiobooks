@@ -42,14 +42,55 @@ def _audit_normalize(s):
       - rhotic schwa (əɹ ≡ ɚ) — misaki emits əɹ; dictionaries vary.
       - unstressed ɪ ↔ ə — English reduces unstressed vowels freely and both
         spellings are widely attested for the same pronunciation
-        (e.g. "record" /ɹɪˈkɔɹd/ ≡ /ɹəˈkɔɹd/). Folding here means the audit
-        only flags genuinely different stressed vowels.
+        (e.g. "record" /ɹɪˈkɔɹd/ ≡ /ɹəˈkɔɹd/).
+
+    NOTE: `normalize_for_compare` (audit_pronunciations.py) already strips
+    every stress mark before this fold runs, and also folds ɜɹ≡ɚ to a single
+    'R'. For a handful of N/V stress-minimal pairs (permit, survey,
+    transport, increase, insult) stress placement plus that ɜɹ/ɚ contrast is
+    the ONLY thing distinguishing the two senses' IPA — once both are
+    stripped, both senses normalize to the same string and the corresponding
+    CASES entries can pass regardless of which sense misaki actually
+    emitted. This is NOT "the audit only flags genuinely different stressed
+    vowels" (the previous claim here) — see `_find_vacuous_case_pairs` and
+    AUDIT_2026-07-16.md §5.7. Stress-stripping is still load-bearing for the
+    rest of the corpus (most expected values carry no stress mark at all),
+    so this is a documented, accepted blind spot rather than something this
+    function can fix in general.
     """
     s = normalize_for_compare(s)
     s = s.replace('ʤ', 'dʒ').replace('ʧ', 'tʃ')
     s = s.replace('əɹ', 'R')
     s = s.replace('ɪ', 'ə')
     return s
+
+
+def _find_vacuous_case_pairs(cases):
+    """Words with 2+ CASES entries whose expected_ipa values collide under
+    `_audit_normalize` — i.e. the two "different" expectations are actually
+    the same string post-normalization, so `audit()`'s equality check
+    passes for whichever sense misaki emits. Mechanical and per-word, not
+    per-case, so it needs no manual judgement and automatically catches any
+    future case added with a colliding expected value, not just the five
+    pairs known today (permit, survey, transport, increase, insult — see
+    AUDIT_2026-07-16.md §5.7). This is a visibility check, not a gate: it
+    does not affect audit()'s pass/fail tally, since the two rejected fixes
+    (a strict stress-preserving compare, or hand-picking non-colliding
+    respellings) either break most of the existing corpus or aren't
+    possible for a pair whose only distinguishing feature IS the thing
+    being folded away.
+    """
+    by_word = {}
+    for word, _sentence, expected in cases:
+        by_word.setdefault(word, set()).add(expected)
+    vacuous = []
+    for word, expecteds in by_word.items():
+        if len(expecteds) < 2:
+            continue
+        normalized = {_audit_normalize(e) for e in expecteds}
+        if len(normalized) < len(expecteds):
+            vacuous.append(word)
+    return sorted(vacuous)
 
 
 # (word, sentence, expected_ipa) — expected IPA is the pronunciation the
@@ -224,8 +265,86 @@ CASES = [
     ('teethed',     'The baby teethed early.',                     'tiðd'),
     ('teethed',     'She teethed late, around fourteen months.',   'tiðd'),
 
+    # Attributive -ed adjectives — syllabic /ɪd/ (LUR-nid) vs verb past
+    # (LURND). Fires only in attributive (dep=amod) position; the verb forms
+    # stay misaki's gold default. misaki collapses both senses otherwise.
+    ('learned',     'A learned man spoke to the crowd.',           'lɜɹnɪd'),
+    ('learned',     'She learned the truth quickly.',              'lɜɹnd'),
+    ('blessed',     'It was a blessed event for all.',             'blɛsɪd'),
+    ('blessed',     'The priest blessed the kneeling crowd.',      'blɛst'),
+    ('aged',        'An aged man sat by the fire.',                'eɪʤɪd'),
+    ('cursed',      'They entered the cursed castle.',             'kɜɹsɪd'),
+    ('beloved',     'Our beloved leader addressed the nation.',    'bɪlʌvɪd'),
+    ('beloved',     'She is my beloved.',                          'bɪlʌvɪd'),
+
+    # 'delegate' verb → full /eɪt/ ('they delegate tasks'); misaki has only
+    # the noun /ət/. Noun sense ('a delegate') keeps /ət/.
+    ('delegate',    'They delegate authority to the team.',        'dɛləɡeɪt'),
+    ('delegate',    'Send a delegate to the summit.',              'dɛləɡət'),
+
+    # 'minute' edge cases — time-unit compound ('minute hand') stays MIN-it;
+    # 'a minute amount' is the 'tiny' sense (the old 'a' block suppressed it).
+    ('minute',      'The minute hand moved slowly.',               'mɪnət'),
+    ('minute',      'A minute amount of dust fell.',               'maɪnut'),
+
+    # 'bow' ribbon/knot sense stays /boʊ/ ('tied a bow in her hair' must not
+    # take the bowing-gesture /baʊ/).
+    ('bow',         'She tied a bow in her hair.',                 'boʊ'),
+
+    # Audit round 3 (2026-07) regressions.
+    # Archery noun before 'to' — an ungated next-token check forced /baʊ/.
+    ('bow',         'He drew the bow to his cheek and fired.',     'boʊ'),
+    ('bow',         'She strapped the bow to her back.',           'boʊ'),
+    # Gesture noun before 'to' still fires via the took/made/gave cues.
+    ('bow',         'He made a slight bow to the crowd.',          'baʊ'),
+
+    # Audit round 4 (2026-07-16) §1.4 — the archery-cue suppression only ran
+    # inside `if is_verb_form`, so a 'took'/'gave'/'made' verb cue paired with
+    # an archery cue in the same sentence still forced /baʊ/ onto the noun.
+    ('bow',         'She took the bow and nocked an arrow.',       'boʊ'),
+    # True positive that must keep working after hoisting the guard.
+    ('bow',         'He took a deep bow.',                         'baʊ'),
+    # Unhyphenated duration compounds are the time unit, not 'tiny'.
+    ('minute',      'They took a ten minute walk.',                'mɪnət'),
+    ('minute',      'It was a five minute break.',                 'mɪnət'),
+    ('minute',      'He made a last minute decision.',             'mɪnət'),
+    # Hyphenated -ed compounds keep the 1-syllable verb form. misaki
+    # tokenizes the compound whole, so the case pins the full token.
+    ('middle-aged', 'A middle-aged man answered the door.',        'mɪdᵊleɪʤd'),
+    # Determiner before 'content' marks the noun even after a copula.
+    ('content',     'Such was the content of the letter.',         'kɑntɛnt'),
+    # 'row between' is the spatial line sense, not the quarrel.
+    ('row',         'She walked down the row between the vines.',  'ɹoʊ'),
+
+    # 2026-07 corpus-sweep regressions: hyphenated duration compounds
+    # (spaCy tokenizes five / - / minute), matured-goods 'aged', and
+    # participial 'learned lesson'.
+    ('five-minute', 'It was a five-minute walk outside town.',     'faɪvmɪnət'),
+    ('last-minute', 'He made a last-minute decision.',             'læstmɪnət'),
+    ('aged',        'The scent of aged wood filled the room.',     'eɪʤd'),
+    ('learned',     'It carried the weight of a learned lesson.',  'lɜɹnd'),
+
+    # 'prayer'/'prayers' devotion sense → /pɹɛɹ(z)/ (1 syllable); misaki gives
+    # the 2-syllable agent form /ˈpɹeɪəɹ/ ('one who prays').
+    ('prayer',      'She said a quiet prayer.',                    'pɹɛɹ'),
+    ('prayers',     'He whispered his evening prayers.',           'pɹɛɹz'),
+
+    # 'frequent' verb → /fɹiˈkwɛnt/; adjective ('frequent visitor') stays
+    # /ˈfɹikwənt/. Inflected verb forms are unambiguously verbal.
+    ('frequent',    'They frequent the old tavern.',               'fɹiˈkwɛnt'),
+    ('frequent',    'He is a frequent visitor here.',              'fɹˈikwənt'),
+    ('frequented',  'She frequented the library often.',           'fɹiˈkwɛntɪd'),
+
+    # 'consummate' adjective → /kənˈsʌmət/ ('a consummate liar'); verb →
+    # /ˈkɑnsəmeɪt/. spaCy mis-tags the attributive adj as NN, so the rule
+    # defaults to the adjective unless the token is clearly a verb.
+    ('consummate',  'She is a consummate professional.',           'kənˈsʌmət'),
+    ('consummate',  'They consummate the merger today.',           'kɑnsəmˈeɪt'),
+
     # Proper-noun gaps in misaki gold/silver — built-in IPA overrides.
     ('angeles',     'They moved to Los Angeles last year.',        'ˈændʒələs'),
+    # 'Los' alone → /lɔs/ ('loss'); misaki gives /loʊz/ ('lohz', voiced).
+    ('los',         'They moved to Los Angeles last year.',        'lɔs'),
     ('yosemite',    'We hiked through Yosemite all summer.',       'joʊsˈɛmɪti'),
     ('sean',        'Sean walked into the room.',                  'ʃɔn'),
     ('aoife',       'Aoife laughed at the joke.',                  'ifə'),
@@ -360,6 +479,14 @@ def main():
                          'and feed sentences straight to misaki. Useful for '
                          'measuring which cases misaki handles unassisted.')
     args = ap.parse_args()
+
+    vacuous = _find_vacuous_case_pairs(CASES)
+    if vacuous:
+        print(f'WARNING: {len(vacuous)} word(s) have CASES entries whose '
+              f'expected IPA collide under _audit_normalize, so those '
+              f'cases pass regardless of which sense misaki actually '
+              f'emits (see AUDIT_2026-07-16.md §5.7): '
+              f'{", ".join(vacuous)}', file=sys.stderr)
 
     print('Loading misaki G2P...', file=sys.stderr)
     passed, failed, rows = audit(CASES, use_pipeline=not args.raw,

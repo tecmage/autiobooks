@@ -182,3 +182,7 @@ windows/espeak-ng/
 windows/wheels/
 windows/kokoro_check/
 windows/nul
+
+# Stray `nul` files from botched Windows shell redirects (reserved filename,
+# breaks `git clone` on Windows)
+/nul

@@ -15,7 +15,8 @@ from pathlib import Path
 from kokoro import KPipeline
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from .text_processing import normalize_text
-from .voices_lang import get_language_from_voice, resolve_voice
+from .voices_lang import (get_language_from_voice, resolve_voice,
+                          get_custom_voice_stat, get_kokoro_lang_code)
 
 
 def _patch_misaki_preprocess():
@@ -100,17 +101,71 @@ else:
     _SUBPROCESS_FLAGS = {}
 
 
-def chapter_wav_name(stem, text, wav_dir):
-    """Return the canonical resume-safe WAV path for a chapter's text.
+def render_key(voice, speed, chapter_gap, heteronyms, contractions,
+               auto_acronyms, substitutions, phoneme_overrides):
+    """Return a stable serialization of every setting that changes the
+    rendered audio for a given chapter text.
 
-    The filename embeds an 8-char MD5 prefix of the chapter text so that
-    reshuffling or shrinking the selected chapter set between runs can't
-    cause a sequential-position resume to feed one chapter's audio into
-    another chapter's slot. Two chapters with identical text deliberately
-    share a wav path (the audio is identical, so re-using it is correct).
+    Folded into chapter_wav_name so a resume only reuses a WAV rendered
+    with the SAME settings — a bare existence check spliced stale audio
+    (previous voice/speed/gap/pronunciation config) into the output after
+    a cancelled run. The GUI, batch, and CLI paths must all build the key
+    through this one function, from the de-emojified voice NAME (never a
+    resolved tensor), so their resume caches keep interoperating.
+
+    Disabled substitution/override entries are dropped: apply_substitutions
+    and apply_phoneme_overrides skip them, so keying on them would miss the
+    whole cache over an edit that cannot change a single sample.
+
+    A custom voice is identified by NAME here, same as always — but a
+    kvoicewalk re-run can overwrite a custom `.pt` in place under the same
+    name, and a name-only key can't tell the discarded tensor from the new
+    one (the §2.4 stale-tensor-cache bug's twin, one layer up: this is the
+    on-disk resume cache rather than the in-process tensor cache). So we
+    look up the file's own (mtime_ns, size) via get_custom_voice_stat and
+    fold it in — a regenerated tensor changes the key and misses the WAV
+    cache instead of splicing stale audio. get_custom_voice_stat returns
+    None for a built-in name (no matching file), and that component is
+    then OMITTED from the list entirely rather than serialized as null —
+    the key for a built-in voice must stay byte-identical to before this
+    was added, so existing resume caches for built-in voices don't all go
+    cold. A missing/unreadable custom `.pt` also resolves to None here;
+    the real error still surfaces later from resolve_voice when the voice
+    is actually loaded for synthesis.
     """
-    h = hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:8]
-    return str(Path(wav_dir) / f'{stem}_chapter_{h}.wav')
+    def _enabled(entries):
+        return [e for e in (entries or []) if e.get('enabled', True)]
+
+    voice_str = str(voice)
+    key_parts = [voice_str, float(speed), float(chapter_gap),
+                 bool(heteronyms), bool(contractions), bool(auto_acronyms),
+                 _enabled(substitutions), _enabled(phoneme_overrides)]
+    custom_stat = get_custom_voice_stat(voice_str)
+    if custom_stat is not None:
+        key_parts.append(list(custom_stat))
+    return json.dumps(key_parts, sort_keys=True, ensure_ascii=True,
+                      separators=(',', ':'))
+
+
+def chapter_wav_name(stem, text, wav_dir, render_key):
+    """Return the canonical resume-safe WAV path for a chapter.
+
+    The filename embeds an 8-char MD5 prefix over the render_key (see
+    render_key()) plus the chapter text: reshuffling or shrinking the
+    selected chapter set between runs can't feed one chapter's audio into
+    another chapter's slot, and a run under different settings misses the
+    cache instead of reusing audio rendered with the old ones. Two
+    chapters with identical text and settings deliberately share a wav
+    path (the audio is identical, so re-using it is correct).
+    """
+    digest = hashlib.md5(render_key.encode('utf-8', errors='replace'))
+    digest.update(b'\x00')
+    digest.update(text.encode('utf-8', errors='replace'))
+    h = digest.hexdigest()[:8]
+    # Absolutized as defense-in-depth alongside the enc_filename fix above —
+    # the hash is over chapter text, not the path, so this doesn't disturb
+    # resume caching.
+    return str((Path(wav_dir) / f'{stem}_chapter_{h}.wav').absolute())
 
 
 def safe_stem(stem, wav_dir):
@@ -131,6 +186,33 @@ def safe_stem(stem, wav_dir):
         return stem
     short_hash = hashlib.md5(stem.encode('utf-8')).hexdigest()[:8]
     return stem[:max_stem - 9] + '_' + short_hash
+
+
+def find_chapter_wavs(stem, wav_dir):
+    """Return every cached chapter WAV for a book stem, sorted, across
+    ALL render_keys — including files left behind by runs under different
+    settings, whose names no current-key list can reproduce.
+
+    This is the ONLY stem-wide sweep in the codebase; every other consumer
+    builds exact paths via chapter_wav_name(). It filters iterdir() on a
+    literal name prefix rather than globbing, because the stem is
+    user-derived and glob metacharacters in a book filename ('The Hobbit
+    [Illustrated]') make a pattern that silently matches nothing — or,
+    worse, matches ANOTHER book's files. The prefix ends at '_chapter_',
+    so stem 'Book' can never match 'Book 2_chapter_*.wav'. `stem` must be
+    the safe_stem() value the files were named with. Callers may only
+    delete the result on SUCCESS or an explicit user-initiated clear —
+    WAVs are kept for resume on cancel/failure. For 'wav' output format
+    the '_enc.wav' intermediates also match; every caller already removes
+    those unconditionally, so sweeping them is harmless. Returns [] when
+    wav_dir is missing or unreadable.
+    """
+    prefix = f'{stem}_chapter_'
+    try:
+        return sorted(p for p in Path(wav_dir).iterdir()
+                      if p.name.startswith(prefix) and p.suffix == '.wav')
+    except OSError:
+        return []
 
 
 def unlink_with_retry(path):
@@ -195,8 +277,10 @@ def _safe_probe_duration(file_name):
     """
     try:
         return probe_duration(file_name)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+    except (RuntimeError, subprocess.TimeoutExpired,
             ValueError, FileNotFoundError) as e:
+        # probe_duration raises RuntimeError (with ffprobe's stderr) on a
+        # non-zero exit or empty output.
         print(f'probe_duration failed for {file_name}: {e}',
               file=sys.stderr)
         return 0.0
@@ -205,6 +289,34 @@ def _safe_probe_duration(file_name):
 _pipeline_cache = {}
 _pipeline_lock = threading.Lock()
 _current_device = 'cpu'
+
+# Single global conversion slot. The GUI convert flow and the batch runner
+# both flip process-global torch state (set_gpu_acceleration) and write the
+# same per-book WAV/encode paths, so exactly one conversion may run at a
+# time. Plain Lock (not RLock) so the slot claimed on the main thread can be
+# released from the worker thread's finally.
+_conversion_lock = threading.Lock()
+
+
+def try_begin_conversion():
+    """Atomically claim the global conversion slot. True when claimed.
+
+    The caller that spawns the worker claims the slot; the worker MUST call
+    end_conversion() in its finally, including on crash paths.
+    """
+    return _conversion_lock.acquire(blocking=False)
+
+
+def end_conversion():
+    """Release the conversion slot claimed by try_begin_conversion()."""
+    try:
+        _conversion_lock.release()
+    except RuntimeError:
+        pass
+
+
+def is_conversion_active():
+    return _conversion_lock.locked()
 
 
 def set_gpu_acceleration(enabled):
@@ -279,8 +391,13 @@ def get_pipeline(lang_code):
 
 def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
                        on_segment=None):
-    # a for american or b for british etc.
-    pipeline = get_pipeline(voice[0])
+    # a for american or b for british etc. — routed through
+    # get_kokoro_lang_code (the same _PREFIX_TO_LANGUAGE table
+    # get_language_from_voice uses) instead of raw voice[0], so this and
+    # normalize_text's language selection can't disagree about what
+    # language a voice is, and an unrecognized prefix raises a named error
+    # here instead of KPipeline's bare assertion tuple.
+    pipeline = get_pipeline(get_kokoro_lang_code(voice))
     voice_arg = resolve_voice(voice)
     audio_segments = []
     speed = float(speed)
@@ -293,16 +410,46 @@ def gen_audio_segments(text, voice, speed, split_pattern=r'\n+',
     return audio_segments
 
 
+def _concat_entry(path):
+    """One `file '...'` line for an ffmpeg concat list.
+
+    Paths are absolutized — ffmpeg resolves relative entries against the
+    concat file's own directory (a TemporaryDirectory here), not the CWD,
+    so a relative input path (CLI `convert books/x.epub`) broke assembly.
+    Quotes use the close-escape-reopen idiom; newlines are rejected up
+    front because the concat format is line-based and a newline-bearing
+    filename would inject a second directive.
+    """
+    p = os.path.abspath(path)
+    if '\n' in p or '\r' in p:
+        raise ValueError(f'newline in audio file path: {p!r}')
+    safe = p.replace("'", "'\\''")
+    return f"file '{safe}'\n"
+
+
+def _part_path(output_path):
+    """Temporary neighbour of the final output for atomic assembly.
+
+    The real extension stays LAST ('book.part.m4b', not 'book.m4b.part')
+    because ffmpeg infers the muxer from it. The final os.replace means a
+    killed mux can never leave a truncated file at the user's chosen path.
+    Absolutized so a relative dash-leading name can't be parsed by ffmpeg
+    as an option (ffmpeg has no '--' end-of-options marker).
+    """
+    p = Path(output_path).absolute()
+    return str(p.with_name(p.stem + '.part' + p.suffix))
+
+
 def create_m4b(chapter_files, output_path, cover_image, title, creator,
                chapter_num, chapter_titles=None, progress_callback=None,
-               known_durations=None, preencoded=False, bitrate='64k', vbr=False):
+               known_durations=None, preencoded=False, bitrate='64k', vbr=False,
+               chapter_numbers=None):
     with TemporaryDirectory() as tempdir:
         # Create concat file listing chapter files
         concat_file = os.path.join(tempdir, 'concat.txt')
         with open(concat_file, 'w', encoding='utf-8') as f:
             for chapter_file in chapter_files:
-                safe_path = chapter_file.replace("'", "'\\''")
-                f.write(f"file '{safe_path}'\n")
+                f.write(_concat_entry(chapter_file))
 
         # Resolve chapter durations for timestamp metadata.
         # When pre-encoded M4A files are provided the WAV-based durations are
@@ -331,11 +478,12 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
 
         chapters_file = create_index_file(
             title, creator, durations, chapter_num, chapter_titles,
-            output_dir=tempdir)
+            output_dir=tempdir, chapter_numbers=chapter_numbers)
 
         # FFmpeg arguments for cover image if present
         cover_image_args = []
         cover_image_path = None
+        part_path = _part_path(output_path)
         try:
             if cover_image:
                 cover_image_file = NamedTemporaryFile("wb", delete=False)
@@ -372,7 +520,7 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 '-movflags', '+disable_chpl',
                 '-progress', 'pipe:1',
                 '-nostats',
-                output_path
+                part_path
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
                **_SUBPROCESS_FLAGS)
 
@@ -381,22 +529,32 @@ def create_m4b(chapter_files, output_path, cover_image, title, creator,
                 target=_drain_stderr, args=(proc, stderr_buf))
             stderr_thread.start()
 
-            for line in proc.stdout:
-                if progress_callback and line.startswith('out_time_ms='):
-                    try:
-                        us = int(line.split('=', 1)[1])
-                        if total_duration_us > 0:
-                            pct = min(100, int(us / total_duration_us * 100))
-                            progress_callback(pct)
-                    except ValueError:
-                        pass
-
-            proc.wait()
-            stderr_thread.join()
+            try:
+                for line in proc.stdout:
+                    if progress_callback and line.startswith('out_time_ms='):
+                        try:
+                            us = int(line.split('=', 1)[1])
+                            if total_duration_us > 0:
+                                pct = min(100, int(us / total_duration_us * 100))
+                                progress_callback(pct)
+                        except ValueError:
+                            pass
+            except BaseException:
+                # A progress callback can raise (e.g. root.after on a
+                # destroyed window) — don't orphan ffmpeg or leave the
+                # non-daemon stderr drainer blocking interpreter exit.
+                proc.kill()
+                raise
+            finally:
+                proc.wait()
+                stderr_thread.join()
             if proc.returncode != 0:
                 stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
                 raise RuntimeError(f"FFmpeg failed:\n{stderr_text}")
+            os.replace(part_path, output_path)
         finally:
+            if os.path.exists(part_path):
+                unlink_with_retry(part_path)
             if cover_image_path and os.path.exists(cover_image_path):
                 for attempt in range(3):
                     try:
@@ -428,8 +586,9 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
     """Run TTS for each chapter text and queue background encoding.
 
     Shared by the CLI and GUI conversion paths. Generates
-    `{stem}_chapter_{hash8}.wav` in `wav_dir` (content-hashed filename so
-    resume stays correct across selection changes) and submits each to
+    `{stem}_chapter_{hash8}.wav` in `wav_dir` (filename hashed over the
+    render settings plus the chapter text so resume stays correct across
+    selection AND settings changes) and submits each to
     `encode_executor` to be encoded to `{stem}_chapter_{i}_enc{ext}` in the
     target format.
 
@@ -449,14 +608,30 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
     returned dict always maps every wav to a future.
 
     Returns a dict with:
-      wav_files      — list[str] in generation order (resumed + newly done)
-      encode_futures — dict[wav_path] -> (Future, encoded_path)
+      wav_files         — list[str] in generation order (resumed + newly
+                          done); identical-text chapters repeat their shared
+                          wav path
+      converted_indices — list[int], parallel to wav_files: the 0-based
+                          index into chapter_texts each wav_files entry came
+                          from. Kept element-for-element aligned with
+                          wav_files (including the duplicate short-circuit
+                          path below) so assemble_output can recover the
+                          original chapter title/ordinal for every surviving
+                          wav by position instead of a lossy membership scan.
+      encode_futures — dict[wav_path] -> (Future, encoded_path); one entry
+                       per DISTINCT wav — duplicate-text chapters reuse the
+                       first occurrence's encode instead of overwriting it
       cancelled      — bool
+      render_key     — the render_key() string the wav names were built
+                       with; assemble_output must reuse it
     """
     wav_dir = Path(wav_dir)
     total = len(chapter_texts)
     enc_ext = _INTERMEDIATE_EXTS.get(out_format, '.m4a')
+    rkey = render_key(voice, speed, chapter_gap, heteronyms, contractions,
+                      auto_acronyms, substitutions, phoneme_overrides)
     wav_files = []
+    converted_indices = []
     encode_futures = {}
     cancelled = False
 
@@ -469,16 +644,40 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
             cancelled = True
             _cancel_pending()
             return {'wav_files': wav_files,
+                    'converted_indices': converted_indices,
                     'encode_futures': encode_futures,
-                    'cancelled': True}
+                    'cancelled': True,
+                    'render_key': rkey}
 
-        wav_filename = chapter_wav_name(stem, text, wav_dir)
-        enc_filename = str(wav_dir / f'{stem}_chapter_{i}_enc{enc_ext}')
+        wav_filename = chapter_wav_name(stem, text, wav_dir, rkey)
+        # Absolutized like _part_path — a relative dash-leading name (CLI
+        # `convert ./-draft.epub`) can't be parsed by ffmpeg as an output
+        # positional (ffmpeg has no '--' end-of-options marker).
+        enc_filename = str((wav_dir / f'{stem}_chapter_{i}_enc{enc_ext}').absolute())
+
+        if wav_filename in encode_futures:
+            # An identical-text chapter earlier in this run already
+            # synthesized this wav and scheduled its encode (duplicate
+            # chapters deliberately share a wav path). Re-synthesizing
+            # would os.replace the wav under the in-flight encode reading
+            # it (PermissionError on Windows), and re-submitting would
+            # overwrite the dict entry — orphaning the first future so a
+            # failed encode went unobserved. Reuse the scheduled encode;
+            # assemble_output then lists the shared enc file once per
+            # occurrence, which is the intended duplicated audio.
+            if on_chapter_start is not None:
+                on_chapter_start(i, total, text, True)
+            wav_files.append(wav_filename)
+            converted_indices.append(i - 1)
+            if on_chapter_done is not None:
+                on_chapter_done(i, None)
+            continue
 
         if resume and Path(wav_filename).exists():
             if on_chapter_start is not None:
                 on_chapter_start(i, total, text, True)
             wav_files.append(wav_filename)
+            converted_indices.append(i - 1)
             encode_futures[wav_filename] = (
                 encode_executor.submit(
                     encode_chapter, wav_filename, enc_filename,
@@ -491,7 +690,13 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
         if on_chapter_start is not None:
             on_chapter_start(i, total, text, False)
 
-        est_segs = max(len(text.split('\n\n\n')), 1)
+        # Estimate matches convert_text_to_wav_file's split_pattern (r'\n+'):
+        # normalized chapter text separates paragraphs with single newlines,
+        # so paragraphs ≈ segments. (The old '\n\n\n' split never matched
+        # normalized text — est_segs was always 1 and per-chapter progress
+        # jumped straight to ~95%.)
+        est_segs = max(
+            len([s for s in re.split(r'\n+', text) if s.strip()]), 1)
 
         def _seg_cb(seg_count, _idx=i, _est=est_segs):
             if on_segment is not None:
@@ -516,6 +721,7 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
 
         if duration is not None:
             wav_files.append(wav_filename)
+            converted_indices.append(i - 1)
             encode_futures[wav_filename] = (
                 encode_executor.submit(
                     encode_chapter, wav_filename, enc_filename,
@@ -530,8 +736,10 @@ def convert_chapters_to_wav(chapter_texts, voice, speed, wav_dir, stem,
         _cancel_pending()
 
     return {'wav_files': wav_files,
+            'converted_indices': converted_indices,
             'encode_futures': encode_futures,
-            'cancelled': cancelled}
+            'cancelled': cancelled,
+            'render_key': rkey}
 
 
 # Map the bitrate spinbox values to libmp3lame VBR quality levels when
@@ -581,13 +789,19 @@ def encode_chapter(wav_path, output_path, output_format='m4b',
 def concat_audio_files(chapter_files, output_path, cover_image=None,
                        title='', creator='', chapter_num=1,
                        chapter_titles=None, progress_callback=None):
-    """Concatenate encoded chapter files into a single output file (non-m4b)."""
+    """Concatenate encoded chapter files into a single output file (non-m4b).
+
+    Writes title/artist/album tags for tag-capable containers and embeds the
+    cover as attached_pic for MP3/FLAC (the ogg/opus muxer doesn't support
+    attached pictures; WAV carries no tags at all). Chapter markers stay the
+    M4B path's job — see create_m4b.
+    """
+    out_ext = Path(output_path).suffix.lower()
     with TemporaryDirectory() as tempdir:
         concat_file = os.path.join(tempdir, 'concat.txt')
         with open(concat_file, 'w', encoding='utf-8') as f:
             for chapter_file in chapter_files:
-                safe_path = chapter_file.replace("'", "'\\''")
-                f.write(f"file '{safe_path}'\n")
+                f.write(_concat_entry(chapter_file))
 
         total_duration_us = 0
         for cf in chapter_files:
@@ -596,38 +810,148 @@ def concat_audio_files(chapter_files, output_path, cover_image=None,
             except Exception:
                 pass
 
-        proc = subprocess.Popen([
-            'ffmpeg', '-y',
-            '-safe', '0',
-            '-f', 'concat',
-            '-i', concat_file,
-            '-c', 'copy',
-            '-progress', 'pipe:1',
-            '-nostats',
-            output_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
-           **_SUBPROCESS_FLAGS)
+        meta_args = []
+        if out_ext != '.wav':
+            if title:
+                meta_args += ['-metadata', f'title={title}',
+                              '-metadata', f'album={title}']
+            if creator:
+                meta_args += ['-metadata', f'artist={creator}']
+        if out_ext == '.mp3':
+            # ID3v2.3 for broadest player compatibility.
+            meta_args += ['-id3v2_version', '3']
 
-        stderr_buf = []
-        stderr_thread = threading.Thread(
-            target=_drain_stderr, args=(proc, stderr_buf))
-        stderr_thread.start()
+        # FLAC must be re-encoded: the concat demuxer cannot stream-copy raw
+        # FLAC across segment boundaries — the output silently contains ONLY
+        # the first chapter (verified: two 1s chapters -c copy → 1.0s file,
+        # no warning). FLAC is lossless, so re-encoding is bit-faithful.
+        if out_ext == '.flac':
+            audio_codec = ['-c:a', 'flac']
+        else:
+            audio_codec = ['-c:a', 'copy']
 
-        for line in proc.stdout:
-            if progress_callback and line.startswith('out_time_ms='):
+        cover_input = []
+        cover_path = None
+        part_path = _part_path(output_path)
+        embed_cover = bool(cover_image) and out_ext in ('.mp3', '.flac')
+        try:
+            if embed_cover:
+                cover_file = NamedTemporaryFile('wb', delete=False)
+                cover_path = cover_file.name
                 try:
-                    us = int(line.split('=', 1)[1])
-                    if total_duration_us > 0:
-                        pct = min(100, int(us / total_duration_us * 100))
-                        progress_callback(pct)
-                except ValueError:
-                    pass
+                    cover_file.write(cover_image)
+                finally:
+                    cover_file.close()
+                cover_input = ['-i', cover_path]
+                stream_args = ['-map', '0:a', '-map', '1:v',
+                               *audio_codec, '-c:v', 'copy',
+                               '-disposition:v', 'attached_pic']
+            else:
+                stream_args = audio_codec
 
-        proc.wait()
-        stderr_thread.join()
-        if proc.returncode != 0:
-            stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
-            raise RuntimeError(f"FFmpeg concat failed:\n{stderr_text}")
+            proc = subprocess.Popen([
+                'ffmpeg', '-y',
+                '-safe', '0',
+                '-f', 'concat',
+                '-i', concat_file,
+                *cover_input,
+                *stream_args,
+                *meta_args,
+                '-progress', 'pipe:1',
+                '-nostats',
+                part_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+               **_SUBPROCESS_FLAGS)
+
+            stderr_buf = []
+            stderr_thread = threading.Thread(
+                target=_drain_stderr, args=(proc, stderr_buf))
+            stderr_thread.start()
+
+            try:
+                for line in proc.stdout:
+                    if progress_callback and line.startswith('out_time_ms='):
+                        try:
+                            us = int(line.split('=', 1)[1])
+                            if total_duration_us > 0:
+                                pct = min(100, int(us / total_duration_us * 100))
+                                progress_callback(pct)
+                        except ValueError:
+                            pass
+            except BaseException:
+                proc.kill()
+                raise
+            finally:
+                proc.wait()
+                stderr_thread.join()
+            if proc.returncode != 0:
+                stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
+                raise RuntimeError(f"FFmpeg concat failed:\n{stderr_text}")
+            os.replace(part_path, output_path)
+        finally:
+            if os.path.exists(part_path):
+                unlink_with_retry(part_path)
+            if cover_path:
+                unlink_with_retry(cover_path)
+
+
+def assemble_output(result, chapter_texts, chapter_titles, stem, wav_dir,
+                    out_format, output_path, cover_image, title, creator,
+                    starting_chapter=1, bitrate='64k', vbr=False,
+                    progress_callback=None):
+    """Wait for background encodes and assemble the final output file.
+
+    The single post-TTS assembly path shared by the GUI, the batch runner,
+    and the CLI (each previously carried its own copy, and they had
+    drifted). `result` is the dict returned by convert_chapters_to_wav;
+    `chapter_texts` must be the SAME list passed to it, since
+    `result['converted_indices']` indexes into it (and into the parallel
+    `chapter_titles`) to recover which original chapters survived — see
+    convert_chapters_to_wav's docstring. `chapter_titles` is a per-chapter
+    title list parallel to chapter_texts, or None for no chapter markers.
+    Returns the encoded files used.
+    """
+    wav_files = result['wav_files']
+    converted_indices = result['converted_indices']
+    encode_futures = result['encode_futures']
+    encoded_files = []
+    for wav_name in wav_files:
+        future, enc_name = encode_futures[wav_name]
+        future.result()
+        encoded_files.append(enc_name)
+
+    if out_format == 'm4b':
+        # Align titles/ordinals with the chapters that actually produced
+        # audio by ORIGINAL INDEX, not by a membership scan — failed/empty
+        # chapters drop out of wav_files and their titles must drop out too
+        # or every later marker shifts. converted_indices is returned by
+        # convert_chapters_to_wav element-for-element parallel to wav_files
+        # (including repeats for duplicate-text chapters), so this is
+        # count- and index-exact by construction, unlike a `wav_name in
+        # wav_files` membership test which can't tell two same-text
+        # chapters apart.
+        converted_titles = None
+        if chapter_titles is not None:
+            converted_titles = [chapter_titles[j] for j in converted_indices]
+            if not converted_titles:
+                converted_titles = None
+        # Original chapter ordinals (starting_chapter-relative) for the
+        # surviving chapters, parallel to encoded_files/durations — lets
+        # create_index_file's generic "Chapter N" fallback keep each
+        # marker's true ordinal instead of renumbering by compacted
+        # position when an earlier chapter fails (§2.6).
+        chapter_numbers = [int(starting_chapter) + j for j in converted_indices]
+        create_m4b(encoded_files, output_path, cover_image,
+                   title, creator, starting_chapter, converted_titles,
+                   progress_callback=progress_callback,
+                   preencoded=True, bitrate=bitrate, vbr=vbr,
+                   chapter_numbers=chapter_numbers)
+    else:
+        concat_audio_files(encoded_files, output_path,
+                           cover_image=cover_image,
+                           title=title, creator=creator,
+                           progress_callback=progress_callback)
+    return encoded_files
 
 
 def encode_chapter_to_m4a(wav_path, m4a_path, bitrate='64k', vbr=False):
@@ -650,27 +974,38 @@ def encode_chapter_to_m4a(wav_path, m4a_path, bitrate='64k', vbr=False):
     return m4a_path
 
 
+def _check_probe(result, file_path):
+    """Raise with ffprobe's stderr on failure — CalledProcessError's message
+    omits it, leaving dialogs showing only 'returned non-zero exit status'."""
+    if result.returncode != 0:
+        stderr_text = (result.stderr or '')[-2000:]
+        raise RuntimeError(
+            f"ffprobe failed for {file_path}:\n{stderr_text}")
+
+
 def _probe_chapters(file_path):
     """Return list of chapter dicts from an m4b file via ffprobe."""
     result = subprocess.run([
-        'ffprobe', '-v', 'quiet',
+        'ffprobe', '-v', 'error',
         '-print_format', 'json',
         '-show_chapters',
         file_path
-    ], capture_output=True, text=True, encoding='utf-8', check=True, timeout=30,
-       **_SUBPROCESS_FLAGS)
+    ], capture_output=True, text=True, encoding='utf-8', errors='replace',
+       timeout=30, **_SUBPROCESS_FLAGS)
+    _check_probe(result, file_path)
     return json.loads(result.stdout).get('chapters', [])
 
 
 def _probe_format_tags(file_path):
     """Return the format-level metadata tags from an m4b file."""
     result = subprocess.run([
-        'ffprobe', '-v', 'quiet',
+        'ffprobe', '-v', 'error',
         '-print_format', 'json',
         '-show_format',
         file_path
-    ], capture_output=True, text=True, encoding='utf-8', check=True, timeout=30,
-       **_SUBPROCESS_FLAGS)
+    ], capture_output=True, text=True, encoding='utf-8', errors='replace',
+       timeout=30, **_SUBPROCESS_FLAGS)
+    _check_probe(result, file_path)
     return json.loads(result.stdout).get('format', {}).get('tags', {})
 
 
@@ -685,8 +1020,7 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
         concat_file = os.path.join(tempdir, 'concat.txt')
         with open(concat_file, 'w', encoding='utf-8') as f:
             for p in [base_path, append_path]:
-                safe = p.replace("'", "'\\''")
-                f.write(f"file '{safe}'\n")
+                f.write(_concat_entry(p))
 
         # Durations and chapters
         base_duration = probe_duration(base_path)
@@ -721,57 +1055,82 @@ def append_m4b(base_path, append_path, output_path, progress_callback=None):
             write_chapters(append_chapters, offset_ms=base_duration_ms)
 
         total_duration_us = (base_duration + append_duration) * 1_000_000
-        proc = subprocess.Popen([
-            'ffmpeg', '-y',
-            '-safe', '0',
-            '-f', 'concat',
-            '-i', concat_file,        # input 0: concatenated audio
-            '-i', chapters_file,      # input 1: merged metadata + chapters
-            '-i', base_path,          # input 2: cover art source
-            '-map', '0:a',
-            '-map', '2:v?',
-            '-c', 'copy',
-            '-disposition:v', 'attached_pic',
-            '-map_metadata', '1',
-            '-movflags', '+disable_chpl',
-            '-progress', 'pipe:1',
-            '-nostats',
-            output_path
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
-           **_SUBPROCESS_FLAGS)
+        part_path = _part_path(output_path)
+        try:
+            proc = subprocess.Popen([
+                'ffmpeg', '-y',
+                '-safe', '0',
+                '-f', 'concat',
+                '-i', concat_file,        # input 0: concatenated audio
+                '-i', chapters_file,      # input 1: merged metadata + chapters
+                '-i', base_path,          # input 2: cover art source
+                '-map', '0:a',
+                '-map', '2:v?',
+                '-c', 'copy',
+                '-disposition:v', 'attached_pic',
+                '-map_metadata', '1',
+                '-movflags', '+disable_chpl',
+                '-progress', 'pipe:1',
+                '-nostats',
+                part_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+               **_SUBPROCESS_FLAGS)
 
-        stderr_buf = []
-        stderr_thread = threading.Thread(
-            target=_drain_stderr, args=(proc, stderr_buf))
-        stderr_thread.start()
+            stderr_buf = []
+            stderr_thread = threading.Thread(
+                target=_drain_stderr, args=(proc, stderr_buf))
+            stderr_thread.start()
 
-        for line in proc.stdout:
-            if progress_callback and line.startswith('out_time_ms='):
-                try:
-                    us = int(line.split('=', 1)[1])
-                    if total_duration_us > 0:
-                        pct = min(100, int(us / total_duration_us * 100))
-                        progress_callback(pct)
-                except ValueError:
-                    pass
-
-        proc.wait()
-        stderr_thread.join()
-        if proc.returncode != 0:
-            stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
-            raise RuntimeError(f"FFmpeg append failed:\n{stderr_text}")
+            try:
+                for line in proc.stdout:
+                    if progress_callback and line.startswith('out_time_ms='):
+                        try:
+                            us = int(line.split('=', 1)[1])
+                            if total_duration_us > 0:
+                                pct = min(100, int(us / total_duration_us * 100))
+                                progress_callback(pct)
+                        except ValueError:
+                            pass
+            except BaseException:
+                proc.kill()
+                raise
+            finally:
+                proc.wait()
+                stderr_thread.join()
+            if proc.returncode != 0:
+                stderr_text = (stderr_buf[0] if stderr_buf else '')[-2000:]
+                raise RuntimeError(f"FFmpeg append failed:\n{stderr_text}")
+            os.replace(part_path, output_path)
+        finally:
+            if os.path.exists(part_path):
+                unlink_with_retry(part_path)
 
 
 def probe_duration(file_name):
     args = ['ffprobe', '-i', file_name, '-show_entries', 'format=duration',
-            '-v', 'quiet', '-of', 'default=noprint_wrappers=1:nokey=1']
-    proc = subprocess.run(args, capture_output=True, text=True, check=True,
+            '-v', 'error', '-of', 'default=noprint_wrappers=1:nokey=1']
+    proc = subprocess.run(args, capture_output=True, text=True,
+                          encoding='utf-8', errors='replace',
                           timeout=30, **_SUBPROCESS_FLAGS)
-    return float(proc.stdout.strip())
+    _check_probe(proc, file_name)
+    out = proc.stdout.strip()
+    if not out:
+        raise RuntimeError(
+            f"ffprobe returned no duration for {file_name}")
+    return float(out)
 
 
 def create_index_file(title, creator, chapter_durations, chapter_num,
-                      chapter_titles=None, output_dir=None):
+                      chapter_titles=None, output_dir=None,
+                      chapter_numbers=None):
+    """`chapter_numbers`, if given, is a list parallel to `chapter_durations`
+    holding each surviving chapter's true original ordinal (starting_chapter
+    + its 0-based index in the full selection). The generic "Chapter N"
+    fallback below uses it instead of `chapter_num + idx` so a marker's
+    number reflects its real position even when an earlier chapter failed
+    and dropped out of the compacted `chapter_durations` list — falls back
+    to the old contiguous-renumbering behaviour when not provided.
+    """
     chapters_path = Path(output_dir or '.') / 'chapters.txt'
     esc_title = _escape_ffmeta(title)
     esc_creator = _escape_ffmeta(creator)
@@ -784,6 +1143,8 @@ def create_index_file(title, creator, chapter_durations, chapter_num,
             end = start + int(duration * 1000)
             if chapter_titles and chapter_titles[idx]:
                 ch_title = chapter_titles[idx]
+            elif chapter_numbers is not None:
+                ch_title = f"Chapter {chapter_numbers[idx]}"
             else:
                 ch_title = f"Chapter {chapter_num + idx}"
             esc_ch_title = _escape_ffmeta(ch_title)
@@ -794,7 +1155,7 @@ def create_index_file(title, creator, chapter_durations, chapter_num,
 
 
 def convert_text_to_wav_file(text, voice, speed, filename,
-                             split_pattern=r'\n\n\n', on_segment=None,
+                             split_pattern=r'\n+', on_segment=None,
                              trailing_silence=0, substitutions=None,
                              heteronyms=True, contractions=True,
                              phoneme_overrides=None, auto_acronyms=False):
@@ -816,7 +1177,9 @@ def convert_text_to_wav_file(text, voice, speed, filename,
         try:
             soundfile.write(part_path, audio, SAMPLE_RATE, format='WAV')
             os.replace(part_path, filename)
-        except Exception:
+        except BaseException:
+            # BaseException so Ctrl+C in CLI mode also cleans up the .part
+            # litter instead of leaving it behind.
             try:
                 Path(part_path).unlink(missing_ok=True)
             except OSError:

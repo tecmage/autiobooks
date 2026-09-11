@@ -256,7 +256,10 @@ class TestExpandAbbreviations:
         assert expand_abbreviations("Dr. Jones") == "Doctor Jones"
 
     def test_etc(self):
-        assert expand_abbreviations("and etc.") == "and et cetera"
+        # Sentence-final "etc." keeps a period so the TTS pause survives.
+        assert expand_abbreviations("and etc.") == "and et cetera."
+        # Mid-sentence "etc." (followed by lowercase) does not gain a period.
+        assert expand_abbreviations("etc. and so on") == "et cetera and so on"
 
     def test_eg(self):
         assert expand_abbreviations("e.g. this") == "for example this"
@@ -273,7 +276,9 @@ class TestExpandAbbreviations:
         assert expand_abbreviations("in St. Louis, Missouri") == "in Saint Louis, Missouri"
 
     def test_st_street_after_capital(self):
-        assert expand_abbreviations("Main St.") == "Main Street"
+        # End of text is a sentence boundary, so the terminator is kept
+        # (audit §1.3). Mid-sentence cases below stay bare.
+        assert expand_abbreviations("Main St.") == "Main Street."
         assert expand_abbreviations("Wall St. closed early.") == "Wall Street closed early."
         assert expand_abbreviations("He lives on Main St. now.") == "He lives on Main Street now."
 
@@ -291,10 +296,10 @@ class TestExpandAbbreviations:
         assert expand_abbreviations("King St. Louis IX") == "King Saint Louis IX"
 
     def test_st_at_end(self):
-        # The period of "St." is consumed by the abbreviation regex (same as
-        # all other entries in ABBREVIATIONS — this matches the prior
-        # behaviour for "St. → Saint" at sentence end).
-        assert expand_abbreviations("He lives on Main St.") == "He lives on Main Street"
+        # "St." at end of text IS the sentence terminator, so 'Street' keeps
+        # the period (audit §1.3). This test previously pinned the opposite —
+        # it characterized the swallowed-terminator bug, not desired output.
+        assert expand_abbreviations("He lives on Main St.") == "He lives on Main Street."
 
     # Military abbreviations
     def test_maj(self):
@@ -374,6 +379,58 @@ class TestExpandRomanNumerals:
 
     def test_appendix_keyword(self):
         assert expand_roman_numerals("Appendix IX") == "Appendix 9"
+
+
+# ---------------------------------------------------------------------------
+# 5b. resolve_contractions (requires spaCy)
+# ---------------------------------------------------------------------------
+
+class TestResolveContractions:
+    """Tests for resolve_contractions(text). Skipped if spaCy is unavailable.
+
+    The disambiguation hinges on the tag spaCy assigns to the 's/'d token
+    itself: a genuine contraction's 's is VBZ and 'd is MD, while a
+    possessive 's is POS. Expanding a possessive corrupts noun phrases
+    ("the book's torn pages" -> "the book has torn pages").
+    """
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_genuine_s_is_expands(self):
+        from autiobooks.text_processing import resolve_contractions
+        assert resolve_contractions("He's running late.") == "He is running late."
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_genuine_s_has_expands(self):
+        from autiobooks.text_processing import resolve_contractions
+        assert resolve_contractions("She's gone home.") == "She has gone home."
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_genuine_d_had_expands(self):
+        from autiobooks.text_processing import resolve_contractions
+        assert resolve_contractions("He'd seen it.") == "He had seen it."
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_genuine_d_would_expands(self):
+        from autiobooks.text_processing import resolve_contractions
+        assert resolve_contractions("He'd go there.") == "He would go there."
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_possessive_before_past_participle_untouched(self):
+        from autiobooks.text_processing import resolve_contractions
+        # Regression: used to become "the book has torn pages".
+        assert resolve_contractions("the book's torn pages") == "the book's torn pages"
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_possessive_before_gerund_untouched(self):
+        from autiobooks.text_processing import resolve_contractions
+        # Regression: used to become "the city is growing population".
+        assert (resolve_contractions("the city's growing population")
+                == "the city's growing population")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_lets_untouched(self):
+        from autiobooks.text_processing import resolve_contractions
+        assert resolve_contractions("let's go") == "let's go"
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +568,18 @@ class TestToMisakiPhonemes:
         assert _to_misaki_phonemes("kənˈtɛnt") == "kənˈtɛnt"
         assert _to_misaki_phonemes("lˈɛd") == "lˈɛd"
         assert _to_misaki_phonemes("tˈɪɹɪŋ") == "tˈɪɹɪŋ"
+
+    def test_ascii_g_folds_to_ipa_g(self):
+        # Audit §1.2: Kokoro's vocab has no ASCII-g (U+0067) key, only the
+        # IPA 'ɡ' (U+0261) that us_gold uses exclusively — a dictionary-typed
+        # override ('ˈgɜːtə', typed on a keyboard) must fold or the /g/
+        # silently drops from the audio.
+        assert _to_misaki_phonemes("ˈgɜːtə") == "ˈɡɜːtə"
+        assert "g" not in _to_misaki_phonemes("ˈgɜːtə")
+
+    def test_ascii_g_fold_idempotent(self):
+        once = _to_misaki_phonemes("ˈgɜːtə")
+        assert _to_misaki_phonemes(once) == once
 
 
 # ---------------------------------------------------------------------------
@@ -888,9 +957,13 @@ class TestPhonemeOverrides:
         assert result == r"[foo](/\1/) here"
 
     def test_named_backref_ipa_is_literal(self):
+        # The ipa string is treated as literal replacement text, not
+        # interpreted as a regex backreference — but it still passes
+        # through _to_misaki_phonemes like any other ipa string, which
+        # folds ASCII 'g' to misaki's 'ɡ' (audit §1.2).
         overrides = [{"word": "foo", "ipa": r"\g<0>"}]
         result = apply_phoneme_overrides("foo here", overrides)
-        assert result == r"[foo](/\g<0>/) here"
+        assert result == "[foo](/\\ɡ<0>/) here"
 
     def test_apostrophe_word_matches(self):
         overrides = [{"word": "O'Brien", "ipa": "X"}]
@@ -946,7 +1019,16 @@ class TestBuiltinPhonemeOverrides:
 
     def test_los_angeles_wrapped(self):
         out = apply_builtin_phoneme_overrides("I went to Los Angeles.", None)
-        assert '[Angeles](/ˈændʒələs/)' in out
+        # ʤ ligature, not two-char dʒ — misaki's alphabet has no 'dʒ'.
+        assert '[Angeles](/ˈænʤələs/)' in out
+        # 'Los' too — misaki otherwise voices it /loʊz/ ("lohz").
+        assert '[Los](/lˈɔs/)' in out
+
+    def test_los_not_matched_inside_words(self):
+        # \\blos\\b must not fire inside Carlos/Marcos/closet/gloss.
+        out = apply_builtin_phoneme_overrides(
+            "Carlos shut the closet; Marcos left.", None)
+        assert '[' not in out
 
     def test_yosemite_wrapped(self):
         out = apply_builtin_phoneme_overrides("Yosemite is huge.", None)
@@ -971,7 +1053,7 @@ class TestBuiltinPhonemeOverrides:
 
     def test_case_insensitive(self):
         out = apply_builtin_phoneme_overrides("ANGELES, angeles, Angeles", None)
-        assert out.count('](/ˈændʒələs/)') == 3
+        assert out.count('](/ˈænʤələs/)') == 3
 
     def test_word_boundary(self):
         # Substring match must not fire — running letters should not match
@@ -1133,11 +1215,12 @@ class TestNormalizePronunciationPipeline:
 
     def test_backref_in_override_ipa_literal(self):
         # Same class of bug we fixed in apply_substitutions — the IPA
-        # template must not be interpreted as a regex replacement.
+        # template must not be interpreted as a regex replacement. The
+        # ASCII 'g' still folds to misaki's 'ɡ' (audit §1.2) either way.
         overrides = [{"word": "foo", "ipa": r"\g<0>"}]
         out = normalize_text("foo here", lang="en-us",
                              phoneme_overrides=overrides)
-        assert r"[foo](/\g<0>/)" in out
+        assert "[foo](/\\ɡ<0>/)" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1163,7 +1246,9 @@ class TestMisakiPreprocessWhitespacePatch:
     accumulated drift for the wrong-token attachment to occur."""
 
     def test_bundled_preprocess_keeps_whitespace_tokens(self):
-        from autiobooks.misaki import en as bundled_en
+        # importorskip: the bundled misaki needs its runtime deps (addict,
+        # num2words); minimal test envs without them skip instead of fail.
+        bundled_en = pytest.importorskip('autiobooks.misaki.en')
         text = "First paragraph.\nSecond paragraph.\n[word](/wˈɜɹd/) here."
         _result, tokens, _features = bundled_en.G2P.preprocess(text)
         whitespace_tokens = [t for t in tokens if t and not t.strip()]
@@ -1176,8 +1261,9 @@ class TestMisakiPreprocessWhitespacePatch:
         # Importing autiobooks.engine must install the monkey-patch on the
         # `misaki` package Kokoro pulls in at runtime — otherwise the runtime
         # path stays broken even when the bundled copy is fixed.
-        from autiobooks import engine  # noqa: F401  (import for side effect)
-        from misaki import en as system_en
+        pytest.importorskip('autiobooks.engine')  # import for side effect;
+        # skips in envs without engine deps (numpy/soundfile/torch/kokoro)
+        system_en = pytest.importorskip('misaki.en')
         assert getattr(
             system_en.G2P.preprocess, '_autiobooks_ws_patch', False), (
             "system misaki.en.G2P.preprocess was not patched on engine import")
@@ -1266,3 +1352,807 @@ class TestMisakiPreprocessWhitespacePatch:
                 continue
             assert t.phonemes != 'bˈWd', (
                 f"IPA leaked onto non-target token text={t.text!r}")
+
+
+# ---------------------------------------------------------------------------
+# 14. Audit regressions (2026-06): ellipsis, roman false positives,
+#     abbreviation punctuation, substitution boundaries, spellout/override
+# ---------------------------------------------------------------------------
+
+class TestEllipsisPreservation:
+    """The scene-break regex must not eat '...' — it is a TTS pause cue."""
+
+    def test_inline_ellipsis_survives(self):
+        assert clean_special_characters("He paused... then left.") == \
+            "He paused... then left."
+
+    def test_dialogue_trailing_ellipsis_survives(self):
+        assert clean_special_characters("No... I will not.") == \
+            "No... I will not."
+
+    def test_unicode_ellipsis_survives_full_pipeline(self):
+        out = normalize_text("Wait… what?")
+        assert "Wait... what?" in out
+
+    def test_four_plus_dots_collapse_to_ellipsis(self):
+        assert clean_special_characters("He left....") == "He left..."
+        assert clean_special_characters("Hmm......") == "Hmm..."
+
+    def test_scene_breaks_still_removed_inline(self):
+        assert "***" not in clean_special_characters("before *** after")
+        assert "---" not in clean_special_characters("x --- y")
+        assert "===" not in clean_special_characters("x === y")
+
+
+class TestRomanNumeralFalsePositives:
+    """Lowercase common words after a keyword must not parse as numerals."""
+
+    def test_part_mix_not_expanded(self):
+        text = "The recipe is part mix, part magic."
+        assert expand_roman_numerals(text) == text
+
+    def test_part_li_not_expanded(self):
+        assert expand_roman_numerals("part li") == "part li"
+
+    def test_lowercase_ivx_numerals_still_expand(self):
+        assert expand_roman_numerals("chapter xi") == "chapter 11"
+        assert expand_roman_numerals("scene iv") == "scene 4"
+
+    def test_real_word_after_keyword_not_expanded(self):
+        # MIX (=1009) and DIV (=504) are valid strict romans but far more
+        # likely the English word after a keyword. The gold-lexicon guard
+        # leaves them alone while genuine numerals still convert.
+        assert expand_roman_numerals("Part MIX was great") == "Part MIX was great"
+        assert expand_roman_numerals("Part DIV covers it") == "Part DIV covers it"
+        assert expand_roman_numerals("Book MCM") == "Book 1900"
+        assert expand_roman_numerals("Chapter XIV") == "Chapter 14"
+
+
+class TestNumberRangeAndDashes:
+    """Numeric hyphen ranges and typewriter em-dashes must not mash words."""
+
+    def test_hyphen_number_range_becomes_to(self):
+        assert "10 to 20" in normalize_text("pages 10-20 here", lang="en-us")
+        assert "3 to 5" in normalize_text("wait 3-5 minutes", lang="en-us")
+
+    def test_hyphen_range_left_alone_when_not_both_digits(self):
+        # Letter/number compounds must survive intact.
+        assert "20-year-old" in normalize_text("a 20-year-old man", lang="en-us")
+        assert "Catch-22" in normalize_text("a Catch-22 here", lang="en-us")
+        assert "3-D" in normalize_text("in 3-D glory", lang="en-us")
+
+    def test_number_range_not_converted_non_english(self):
+        assert "10 to 20" not in normalize_text("pages 10-20", lang="fr-fr")
+
+    def test_double_hyphen_emdash_becomes_comma(self):
+        assert normalize_text("wait--no, stop", lang="en-us") == "wait, no, stop"
+        assert "paused, then" in normalize_text("she paused -- then ran", lang="en-us")
+
+    def test_standalone_hyphen_rule_still_stripped(self):
+        # A separator line of hyphens (no adjacent word char) is still removed.
+        out = normalize_text("text\n---\nmore", lang="en-us")
+        assert "---" not in out
+
+    def test_degrees_not_glued_to_unit(self):
+        assert "degrees F" in normalize_text("it was 98.6°F", lang="en-us")
+        assert "degrees C" in normalize_text("boils at 100°C", lang="en-us")
+        assert "degreesF" not in normalize_text("it was 98.6°F", lang="en-us")
+
+    def test_litrpg_arrow_variants_stripped(self):
+        # Dingbat/supplemental arrows common in LitRPG stat blocks must not
+        # reach the TTS (basic ←↑→↓ were already handled; these were not).
+        import re
+        arrow_class = re.compile('[←-⇿➔-➿'
+                                 '⟰-⟿⤀-⥿⬀-⯿]')
+        for s in ["Skill (lv50) ➔ Skill (lv60)", "HP 90 ⇒ 100",
+                  "Skill ➜ Evolved", "before ⟶ after", "left ⬅ right ⮕ end"]:
+            assert not arrow_class.search(normalize_text(s, lang="en-us"))
+
+
+class TestAbbreviationBeforePunctuation:
+    """Abbreviations followed by punctuation (not just whitespace) expand."""
+
+    def test_et_al_before_comma(self):
+        assert expand_abbreviations("Smith et al., 2020") == \
+            "Smith and others, 2020"
+
+    def test_abbreviation_before_close_paren(self):
+        assert expand_abbreviations("(see pp. 3, etc.)") == \
+            "(see pages 3, et cetera)"
+
+    def test_abbreviation_before_close_quote(self):
+        assert expand_abbreviations('He said "etc." loudly') == \
+            'He said "et cetera" loudly'
+
+
+class TestSubstitutionBoundaries:
+    """whole_word anchors only on word-char edges so '$100'-style finds work."""
+
+    def test_whole_word_non_word_prefix_matches(self):
+        subs = [{"find": "$100", "replace": "one hundred dollars",
+                 "whole_word": True}]
+        assert apply_substitutions("It costs $100 total", subs) == \
+            "It costs one hundred dollars total"
+
+    def test_whole_word_non_word_prefix_no_partial(self):
+        subs = [{"find": "$100", "replace": "one hundred dollars",
+                 "whole_word": True}]
+        assert apply_substitutions("It costs $1000 total", subs) == \
+            "It costs $1000 total"
+
+
+class TestAcronymOverrideInteraction:
+    """Phoneme-override words must survive auto-acronym spellout."""
+
+    def test_user_override_protects_acronym(self):
+        overrides = [{"word": "CIA", "ipa": "X"}]
+        out = normalize_text("The CIA called.", auto_acronyms=True,
+                             phoneme_overrides=overrides)
+        assert "[CIA](/X/)" in out
+        assert "C. I. A." not in out
+
+    def test_disabled_override_does_not_protect(self):
+        overrides = [{"word": "CIA", "ipa": "X", "enabled": False}]
+        out = normalize_text("The CIA called.", auto_acronyms=True,
+                             phoneme_overrides=overrides)
+        assert "C. I. A." in out
+
+    def test_builtin_override_word_not_spelled_out(self):
+        out = normalize_text("SEAN stood up.", auto_acronyms=True)
+        assert "S. E. A. N." not in out
+        assert "](/" in out  # wrapped by the built-in override instead
+
+
+# ---------------------------------------------------------------------------
+# Audit round 2 — regression tests
+# ---------------------------------------------------------------------------
+
+class TestRomanNumeralPronounGuard:
+    """Bare single-letter numerals after a lowercase keyword are far more
+    likely the pronoun 'I' than the numeral 1."""
+
+    def test_book_i_pronoun_untouched(self):
+        text = "The book I read was long."
+        assert expand_roman_numerals(text) == text
+
+    def test_part_i_pronoun_untouched(self):
+        text = "For my part I agree."
+        assert expand_roman_numerals(text) == text
+
+    def test_act_i_pronoun_untouched(self):
+        text = "In the second act I noticed a change."
+        assert expand_roman_numerals(text) == text
+
+    def test_pronoun_with_comma_untouched(self):
+        text = "For my part I, too, agreed."
+        assert expand_roman_numerals(text) == text
+
+    def test_capitalized_keyword_converts(self):
+        assert expand_roman_numerals(
+            "Book I covers the basics.") == "Book 1 covers the basics."
+
+    def test_capitalized_keyword_midsentence(self):
+        assert expand_roman_numerals(
+            "In Act I the hero dies") == "In Act 1 the hero dies"
+
+    def test_lowercase_heading_at_line_end(self):
+        assert expand_roman_numerals("chapter i") == "chapter 1"
+
+    def test_lowercase_heading_with_colon(self):
+        assert expand_roman_numerals(
+            "part i: the beginning") == "part 1: the beginning"
+
+    def test_multiletter_numeral_unaffected(self):
+        assert expand_roman_numerals(
+            "She read book II at school.") == "She read book 2 at school."
+
+
+class TestRomanNumeralSingleLetterCDLM:
+    """Audit §1.1: single-letter C/D/L/M never convert, even in heading-like
+    position — only I/V/X stay ambiguous section numerals."""
+
+    def test_appendix_c_unchanged(self):
+        text = "See Appendix C for details."
+        assert expand_roman_numerals(text) == text
+
+    def test_part_d_unchanged(self):
+        text = "Part D of the contract"
+        assert expand_roman_numerals(text) == text
+
+    def test_section_c_unchanged(self):
+        text = "Section C: exclusions"
+        assert expand_roman_numerals(text) == text
+
+    def test_volume_l_unchanged(self):
+        text = "Volume L"
+        assert expand_roman_numerals(text) == text
+
+    def test_chapter_m_unchanged(self):
+        text = "Chapter M"
+        assert expand_roman_numerals(text) == text
+
+    def test_real_numeral_still_converts(self):
+        assert expand_roman_numerals("Chapter IV") == "Chapter 4"
+
+
+class TestEdAbbreviation:
+    """'Ed.' expands to 'Edition' only after a digit/ordinal."""
+
+    def test_name_ed_at_sentence_end_untouched(self):
+        text = "Thanks, Ed. See you soon."
+        assert expand_abbreviations(text) == text
+
+    def test_ordinal_ed_expands(self):
+        assert expand_abbreviations("2nd Ed.") == "2nd Edition"
+
+    def test_digit_ed_expands(self):
+        assert expand_abbreviations(
+            "The 3 Ed. printing") == "The 3 Edition printing"
+
+    def test_bare_ed_untouched(self):
+        text = "Ed. note: see appendix."
+        assert expand_abbreviations(text) == text
+
+
+class TestUserOverridesWin:
+    """User phoneme overrides and substitutions beat every built-in
+    markdown-emitting pass — no nested `[[word](/a/)](/b/)` output."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_user_override_beats_contextual_bowed(self):
+        overrides = [{"word": "bowed", "ipa": "bˈOd"}]
+        out = normalize_text("He bowed his head.",
+                             phoneme_overrides=overrides)
+        assert "[bowed](/bˈOd/)" in out
+        assert "[[" not in out
+
+    def test_user_override_beats_resume_wrap(self):
+        overrides = [{"word": "resume", "ipa": "ɹɪzˈum"}]
+        out = normalize_text("Her résumé was strong.",
+                             phoneme_overrides=overrides)
+        assert "[resume](/ɹɪzˈum/)" in out
+        assert "[[" not in out
+
+    def test_substitution_beats_resume_wrap(self):
+        subs = [{"find": "resume", "replace": "CV"}]
+        out = normalize_text("Her résumé was strong.", substitutions=subs)
+        assert "CV" in out
+        assert "[" not in out
+
+    def test_substitution_skips_existing_markdown(self):
+        subs = [{"find": "bowed", "replace": "nodded"}]
+        out = apply_substitutions("[bowed](/bˈWd/) and then he bowed", subs)
+        assert out == "[bowed](/bˈWd/) and then he nodded"
+
+    def test_phoneme_override_skips_existing_markdown(self):
+        overrides = [{"word": "bowed", "ipa": "x"}]
+        text = "[bowed](/bˈWd/)"
+        assert apply_phoneme_overrides(text, overrides) == text
+
+    def test_builtin_override_skips_existing_markdown(self):
+        text = "[sean](/ʃˈɔn/)"
+        assert apply_builtin_phoneme_overrides(text, None) == text
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_user_override_lead_not_respelled(self):
+        overrides = [{"word": "lead", "ipa": "lˈid"}]
+        out = normalize_text("He will lead the team.",
+                             phoneme_overrides=overrides)
+        assert "[lead](/lˈid/)" in out
+        assert "leed" not in out
+
+
+class TestSentenceClampedHeteronyms:
+    """Contextual rule windows must not leak cues across sentence
+    boundaries."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bow_cue_does_not_cross_sentence(self):
+        out = apply_contextual_overrides(
+            "They take the stage. Bow strings snapped.")
+        assert "[Bow](" not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_content_cue_does_not_cross_sentence(self):
+        out = apply_contextual_overrides(
+            "There it is. Content filtering helps.")
+        assert "[Content](" not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bass_cue_does_not_cross_sentence(self):
+        out = apply_contextual_overrides(
+            "He played jazz. Bass swam in the lake.")
+        assert "[Bass](" not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bow_gesture_still_wraps(self):
+        out = apply_contextual_overrides("He took a bow.")
+        assert "[bow](/bˈW/)" in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_content_predicate_still_wraps(self):
+        out = apply_contextual_overrides("He was content with that.")
+        assert "[content](/kənˈtɛnt/)" in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_content_noun_compound_not_wrapped_despite_copula(self):
+        # A copula earlier in the window must not force the adjective sense
+        # when 'content' is a compound modifier of a following noun
+        # ("content creator/manager/writers" = CON-tent, not con-TENT).
+        for s in ("He is a content creator.",
+                  "She was the content manager.",
+                  "They are content writers."):
+            assert "[content]" not in apply_contextual_overrides(s)
+
+
+class TestEdAdjectiveHeteronyms:
+    """Attributive -ed adjectives take the syllabic /ɪd/ form; verb past
+    stays misaki's 1-syllable default. Plus 'beloved' and 'delegate'."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_learned_adjective_wraps(self):
+        assert "[learned](/lˈɜɹnɪd/)" in apply_contextual_overrides(
+            "A learned man spoke.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_learned_verb_not_wrapped(self):
+        assert "[learned]" not in apply_contextual_overrides(
+            "She learned the truth quickly.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_blessed_aged_cursed_adjective_wrap(self):
+        assert "[blessed](" in apply_contextual_overrides("a blessed event")
+        assert "[aged](" in apply_contextual_overrides("an aged man")
+        assert "[cursed](" in apply_contextual_overrides("a cursed sword")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_blessed_verb_not_wrapped(self):
+        assert "[blessed]" not in apply_contextual_overrides(
+            "The priest blessed them.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_beloved_always_wraps(self):
+        for s in ("Our beloved leader spoke.", "She is my beloved.",
+                  "Dearly beloved, we gather here."):
+            assert "[beloved](/bɪˈlʌvɪd/)" in apply_contextual_overrides(s)
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_delegate_verb_wraps_noun_does_not(self):
+        assert "[delegate](" in apply_contextual_overrides(
+            "They delegate authority to her.")
+        assert "[delegate]" not in apply_contextual_overrides(
+            "Send a delegate to the summit.")
+
+
+class TestMinuteBowEdgeCases:
+    """Regression guards for the minute/bow false positives/negatives."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_minute_time_compound_not_wrapped(self):
+        # 'minute hand'/'minute book' are the time unit (MIN-it), not 'tiny'.
+        assert "[minute]" not in apply_contextual_overrides(
+            "The minute hand moved slowly.")
+        assert "[minute]" not in apply_contextual_overrides(
+            "The minute book recorded it.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_minute_tiny_after_a_still_wraps(self):
+        # Regression: the old 'a' block suppressed the 'tiny' sense here.
+        assert "[minute](/mIˈnut/)" in apply_contextual_overrides(
+            "A minute amount of dust fell.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bow_ribbon_not_gesture(self):
+        # A ribbon bow is /boʊ/, not the bowing gesture /baʊ/.
+        assert "[bow]" not in apply_contextual_overrides(
+            "She tied a bow in her hair.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bow_gesture_still_wraps_after_fix(self):
+        assert "[bow](/bˈW/)" in apply_contextual_overrides("He took a bow.")
+
+
+class TestPrayerFrequentConsummate:
+    """prayer/frequent/consummate from the comprehensive heteronym sweep."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_prayer_devotion_one_syllable(self):
+        assert "[prayer](/pɹˈɛɹ/)" in apply_contextual_overrides(
+            "She said a quiet prayer.")
+        assert "[prayers](/pɹˈɛɹz/)" in apply_contextual_overrides(
+            "He whispered his prayers.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_prayer_not_matched_as_substring(self):
+        # 'prayers' inside other words / agent-noun edge cases aside, the
+        # tokenizer keeps it whole — but guard the common 'prayer book'.
+        out = apply_contextual_overrides("The prayer book was worn.")
+        assert "[prayer](/pɹˈɛɹ/)" in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_frequent_verb_vs_adjective(self):
+        assert "[frequent](/fɹiˈkwɛnt/)" in apply_contextual_overrides(
+            "They frequent the tavern.")
+        assert "[frequent]" not in apply_contextual_overrides(
+            "He is a frequent visitor.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_frequent_inflections_wrap(self):
+        assert "[frequented](" in apply_contextual_overrides(
+            "She frequented the library.")
+        assert "[frequents](" in apply_contextual_overrides(
+            "He frequents the bar.")
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_consummate_adjective_vs_verb(self):
+        assert "[consummate](/kənˈsʌmət/)" in apply_contextual_overrides(
+            "She is a consummate professional.")
+        assert "[consummate]" not in apply_contextual_overrides(
+            "They consummate the merger today.")
+
+
+class TestAcronymSpelloutEmphasis:
+    """All-caps emphasis of ordinary words and roman numerals must not be
+    letterized when auto-acronym spellout is on."""
+
+    def test_shouted_word_not_letterized(self):
+        out = apply_acronym_spellout("He shouted STOP at once.", True)
+        assert "S. T. O. P." not in out
+        assert "STOP" in out
+
+    def test_the_end_not_letterized(self):
+        out = apply_acronym_spellout("THE END", True)
+        assert out == "THE END"
+
+    def test_roman_numeral_beyond_twelve_not_letterized(self):
+        out = apply_acronym_spellout("XIII", True)
+        assert out == "XIII"
+
+    def test_large_roman_numeral_not_letterized(self):
+        out = apply_acronym_spellout("Section XLVII begins.", True)
+        assert "X. L. V. I. I." not in out
+
+    def test_genuine_acronym_still_letterized(self):
+        out = apply_acronym_spellout("The FBI arrived.", True)
+        assert "F. B. I." in out
+
+
+# ---------------------------------------------------------------------------
+# 14. Audit round 3 regressions (2026-07)
+# ---------------------------------------------------------------------------
+
+class TestAuditRound3Heteronyms:
+    """Contextual-rule misfires found by the 2026-07 audit. Each pair pins
+    the fixed case AND the neighbouring case that must keep working."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_archery_bow_to_not_gesture(self):
+        # §1.1 — the ungated next-token check forced /baʊ/ onto the noun.
+        out = apply_contextual_overrides(
+            "He drew the bow to his cheek and fired.")
+        assert '[bow](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_verb_bowed_to_still_gesture(self):
+        out = apply_contextual_overrides("She bowed to the king.")
+        assert '[bowed](/bˈWd/)' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_ten_minute_walk_is_time_unit(self):
+        # §1.2 — number words before 'minute' fix the time sense.
+        out = apply_contextual_overrides("They took a ten minute walk.")
+        assert '[minute](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_last_minute_is_time_unit(self):
+        out = apply_contextual_overrides("He made a last minute decision.")
+        assert '[minute](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_minute_amount_still_tiny(self):
+        out = apply_contextual_overrides("A minute amount of poison remained.")
+        assert '[minute](/mIˈnut/)' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_every_minute_detail_still_tiny(self):
+        out = apply_contextual_overrides("Every minute detail was examined.")
+        assert '[minute](/mIˈnut/)' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_middle_aged_not_syllabic(self):
+        # §1.4 — hyphenated compounds keep the 1-syllable verb form.
+        out = apply_contextual_overrides("A middle-aged man answered.")
+        assert '[aged](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_bare_attributive_aged_still_syllabic(self):
+        out = apply_contextual_overrides("An aged wizard entered.")
+        assert '[aged](/ˈAʤɪd/)' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_content_of_the_letter_is_noun(self):
+        # §1.5 — determiner immediately before 'content' wins over a copula
+        # earlier in the window.
+        out = apply_contextual_overrides("Such was the content of the letter.")
+        assert '[content](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_predicate_content_still_adjective(self):
+        out = apply_contextual_overrides("He was content with the result.")
+        assert '[content](/kənˈtɛnt/)' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_row_between_vines_is_line_sense(self):
+        # §1.12 — 'between' dropped from the argument-next cues.
+        out = apply_contextual_overrides(
+            "She walked down the row between the vines.")
+        assert '[row](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_huge_row_still_argument(self):
+        out = apply_contextual_overrides("They had a huge row about money.")
+        assert '[row](/ɹˈW/)' in out
+
+
+class TestAuditRound3Abbreviations:
+    def test_lettered_list_c_not_circa(self):
+        # §1.13 — 'c.' expands only before a digit.
+        out = expand_abbreviations("a. apples b. pears c. plums")
+        assert 'circa' not in out
+
+    def test_bc_era_not_circa(self):
+        out = expand_abbreviations("around 400 b.c. the city fell")
+        assert 'circa' not in out
+
+    def test_c_before_year_is_circa(self):
+        out = expand_abbreviations("The manuscript dates from c. 1850.")
+        assert 'circa 1850' in out
+
+    def test_capitalized_ave_expands(self):
+        # §1.14 — street abbreviations are capitalized in real text.
+        assert 'Avenue' in expand_abbreviations("He lived on Fifth Ave. for years.")
+
+    def test_capitalized_blvd_expands(self):
+        assert 'Boulevard' in expand_abbreviations("Sunset Blvd. was empty.")
+
+
+class TestAuditRound4TerminalAbbreviations:
+    # §1.3 — suffix/place abbreviations trail their noun, so they end
+    # sentences routinely; a plain expansion ate the terminator and merged
+    # the sentences into a pauseless run-on.
+    def test_st_street_keeps_sentence_period(self):
+        assert normalize_text("42 Elm St. It was cold", lang="en-us") == \
+            "42 Elm Street. It was cold"
+
+    def test_ave_keeps_sentence_period(self):
+        assert normalize_text("Fifth Ave. The rain fell.", lang="en-us") == \
+            "Fifth Avenue. The rain fell."
+
+    def test_dept_keeps_sentence_period(self):
+        assert normalize_text("Ask the dept. They know.", lang="en-us") == \
+            "Ask the department. They know."
+
+    def test_street_midsentence_drops_period(self):
+        # Not a boundary — no terminator may be invented.
+        assert normalize_text("He lived on Elm St. in Ohio", lang="en-us") == \
+            "He lived on Elm Street in Ohio"
+
+    def test_saint_never_gains_period(self):
+        # 'Saint' precedes a name, so it can't be sentence-final.
+        assert normalize_text("We met at St. Peter for lunch.", lang="en-us") == \
+            "We met at Saint Peter for lunch."
+
+    def test_title_never_gains_period(self):
+        assert "Mister Smith" in normalize_text("Mr. Smith arrived.", lang="en-us")
+
+    def test_etc_control_still_keeps_period(self):
+        assert "et cetera. Then" in normalize_text(
+            "...and so on, etc. Then he left.", lang="en-us")
+
+    def test_jr_deliberately_excluded(self):
+        # _ends_sentence can't separate "Smith Jr. He was tall." from
+        # "Jr. High School" / "King Jr. Day", so Jr./Sr. keep the plain
+        # expansion. Pins the documented trade-off, not desired prose.
+        out = normalize_text("Martin Luther King Jr. Day", lang="en-us")
+        assert out == "Martin Luther King Junior Day"
+
+
+class TestAuditRound3IpaFolding:
+    def test_affricate_dz_folds_to_ligature(self):
+        # §1.15 — misaki's alphabet has no two-char 'dʒ'/'tʃ'.
+        assert _to_misaki_phonemes('ˈændʒələs') == 'ˈænʤələs'
+        assert _to_misaki_phonemes('tʃɜɹtʃ') == 'ʧɜɹʧ'
+
+    def test_folding_idempotent(self):
+        once = _to_misaki_phonemes('ˈændʒələs aʊ tʃ')
+        assert _to_misaki_phonemes(once) == once
+
+    def test_parens_stripped(self):
+        # §1.3 belt-and-braces — paren IPA breaks misaki's LINK_REGEX.
+        assert _to_misaki_phonemes('ˈlɪs(ə)n') == 'ˈlɪsən'
+
+    def test_paren_ipa_survives_normalize_text(self):
+        out = normalize_text(
+            "Listen carefully.",
+            heteronyms=False, contractions=False,
+            phoneme_overrides=[
+                {'word': 'listen', 'ipa': 'ˈlɪs(ə)n', 'enabled': True}])
+        assert '[Listen](/ˈlɪsən/)' in out
+        assert ')n' not in out
+
+
+class TestAuditRound3UserAlwaysWins:
+    def test_accented_override_matches_folded_text(self):
+        # §4.2 — strip_diacritics folds the text before user passes run;
+        # the user's accented word must fold the same way.
+        out = normalize_text(
+            "Zoë smiled.", heteronyms=False, contractions=False,
+            phoneme_overrides=[
+                {'word': 'Zoë', 'ipa': 'zˈoʊi', 'enabled': True}])
+        assert '[Zoe](/zˈOi/)' in out
+
+    def test_accented_substitution_matches_folded_text(self):
+        out = normalize_text(
+            "Zoë smiled.", heteronyms=False, contractions=False,
+            substitutions=[
+                {'find': 'Zoë', 'replace': 'Zoey', 'enabled': True}])
+        assert 'Zoey smiled.' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_contraction_substitution_wins(self):
+        # §4.3 — resolve_contractions must skip suppressed contractions.
+        out = normalize_text(
+            "She'd seen it before.", heteronyms=False, contractions=True,
+            substitutions=[
+                {'find': "She'd", 'replace': 'She had already'}])
+        assert 'She had already seen it before.' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_multiword_substitution_beats_contextual_rule(self):
+        # §4.4 — each word of a multi-word find joins the suppression set.
+        out = normalize_text(
+            "He was poisoned by lead paint.", contractions=False,
+            substitutions=[
+                {'find': 'lead paint', 'replace': 'led paint'}])
+        assert 'led paint' in out
+        assert '[lead](' not in out
+
+
+class TestAuditRound3AcronymSpellout:
+    def test_markdown_span_not_letterized(self):
+        # §1.6 — the spellout must not corrupt [WORD](/IPA/) markdown
+        # emitted by the contextual pass.
+        out = apply_acronym_spellout("HE [BOWED](/bˈWd/) HIS HEAD.", True)
+        assert '[BOWED](/bˈWd/)' in out
+
+    def test_real_word_caps_not_letterized(self):
+        # 'bowed' is absent from misaki gold (no inflections) but is a real
+        # word — all-caps emphasis must not be spelled out.
+        out = apply_acronym_spellout("HE BOWED BEFORE THE KING", True)
+        assert 'B. O. W. E. D.' not in out
+
+    def test_short_acronyms_still_letterized(self):
+        # FBI/CIA are cmudict entries; the real-word check is 4+ letters so
+        # short letter-read acronyms keep spelling out.
+        out = apply_acronym_spellout("The FBI and CIA arrived.", True)
+        assert 'F. B. I.' in out
+        assert 'C. I. A.' in out
+
+
+class TestCorpusSweepRegressions:
+    """Misfires found by the 2026-07 1.4M-word library sweep."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_hyphenated_minute_compound_is_time_unit(self):
+        # spaCy tokenizes 'five-minute' as five / - / minute; the blocklist
+        # must look through the hyphen.
+        for text in ("It was a five-minute walk outside town.",
+                     "He made a last-minute decision.",
+                     "It was about a 20-minute walk away."):
+            assert '[minute](' not in apply_contextual_overrides(text), text
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_unhyphenated_middle_aged_not_syllabic(self):
+        out = apply_contextual_overrides("A middle aged man answered.")
+        assert '[aged](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_matured_goods_aged_not_syllabic(self):
+        for text in ("The scent of aged wood filled the room.",
+                     "That is ten-year aged Gouda."):
+            assert '[aged](' not in apply_contextual_overrides(text), text
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_aged_wizard_still_syllabic(self):
+        out = apply_contextual_overrides("An aged wizard entered.")
+        assert '[aged](/ˈAʤɪd/)' in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_learned_lesson_not_syllabic(self):
+        out = apply_contextual_overrides(
+            "The words carried the weight of a learned lesson.")
+        assert '[learned](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_learned_man_still_syllabic(self):
+        out = apply_contextual_overrides("A learned man spoke to the crowd.")
+        assert '[learned](/lˈɜɹnɪd/)' in out
+
+
+# ---------------------------------------------------------------------------
+# 15. Audit round 4 regressions (2026-07-16)
+# ---------------------------------------------------------------------------
+
+class TestAuditRound4BowArchery:
+    """§1.4 — the archery-cue suppression only ran inside `if is_verb_form`,
+    so a _BOW_VERB_CUES word ('took'/'gave'/'made') paired with an archery
+    cue in the same sentence still forced the gesture sense onto the noun."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_took_bow_nocked_arrow_not_gesture(self):
+        out = apply_contextual_overrides(
+            "She took the bow and nocked an arrow.")
+        assert '[bow](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_took_bow_from_archer_not_gesture(self):
+        out = apply_contextual_overrides("He took the bow from the archer.")
+        assert '[bow](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_gave_bow_and_quiver_not_gesture(self):
+        out = apply_contextual_overrides("She gave him the bow and a quiver.")
+        assert '[bow](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_deep_bow_still_gesture(self):
+        # The true positive that must keep working after hoisting the guard.
+        out = apply_contextual_overrides("He took a deep bow.")
+        assert '[bow](/bˈW/)' in out
+
+
+class TestAuditRound4RowOf:
+    """§1.5 — 'row of X' is the canonical line sense regardless of a
+    preceding argument-cue adjective; 'right'/'family' are dropped from
+    _ROW_ARGUMENT_PREV as high-frequency line-sense modifiers."""
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_big_row_of_houses_is_line_sense(self):
+        out = apply_contextual_overrides(
+            "They stood before a big row of houses.")
+        assert '[row](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_huge_row_of_tents_is_line_sense(self):
+        out = apply_contextual_overrides(
+            "A huge row of tents lined the field.")
+        assert '[row](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_right_row_no_longer_argument(self):
+        out = apply_contextual_overrides("He sat in the right row and waited.")
+        assert '[row](' not in out
+
+    @pytest.mark.skipif(not HAS_SPACY, reason="spaCy not installed")
+    def test_huge_row_about_money_still_argument(self):
+        # The true positive that must keep working.
+        out = apply_contextual_overrides("They had a huge row about money.")
+        assert '[row](/ɹˈW/)' in out
+
+
+class TestAuditRound4EmptyFoldGuard:
+    """§1.6 — the emptiness check ran BEFORE strip_diacritics, so a find/word
+    that is Mn-only (a bare combining accent) folded to '' and built the
+    empty regex pattern, which matches at every position in the text."""
+
+    def test_substitution_mn_only_find_skipped(self):
+        out = apply_substitutions(
+            'abc', [{'find': '́', 'replace': 'X'}],
+            fold_diacritics=True)
+        assert out == 'abc'
+
+    def test_phoneme_override_mn_only_word_skipped(self):
+        out = apply_phoneme_overrides(
+            'abc', [{'word': '́', 'ipa': 'k'}],
+            fold_diacritics=True)
+        assert out == 'abc'

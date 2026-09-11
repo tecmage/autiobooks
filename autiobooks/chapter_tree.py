@@ -1,13 +1,11 @@
 """Hierarchical chapter selector with ttk.Treeview, checkboxes, and preview."""
 
-import hashlib
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageDraw, ImageTk
 
-
-def _content_hash(text):
-    return hashlib.md5(text.encode('utf-8', errors='replace')).digest()
+from .epub_parser import _extract_heading, _toc_href_to_filename
+from .selection import find_duplicates
 
 
 class ChapterTreeView:
@@ -19,11 +17,20 @@ class ChapterTreeView:
     """
 
     _checkbox_images = {}
+    _checkbox_images_master = None
 
     @classmethod
-    def _init_checkbox_images(cls):
-        if cls._checkbox_images:
+    def _init_checkbox_images(cls, master):
+        # ImageTk.PhotoImage objects are bound to the Tk interpreter that
+        # created them. A second start_gui() in the same process creates a
+        # new Tk root/interpreter — reusing the old cache raises TclError
+        # ("image ... doesn't exist") the first time it's used. Identify the
+        # interpreter by its Tcl interpreter object (`widget.tk`), not by
+        # widget path string — two different roots can both be named ".".
+        interp = master.tk
+        if cls._checkbox_images and cls._checkbox_images_master is interp:
             return
+        cls._checkbox_images = {}
         for name in ('unchecked', 'checked', 'half'):
             img = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
@@ -32,12 +39,13 @@ class ChapterTreeView:
                 draw.line([3, 8, 6, 11, 13, 3], fill='#2e7d32', width=2)
             elif name == 'half':
                 draw.line([3, 8, 13, 8], fill='#666666', width=2)
-            cls._checkbox_images[name] = ImageTk.PhotoImage(img)
+            cls._checkbox_images[name] = ImageTk.PhotoImage(img, master=master)
+        cls._checkbox_images_master = interp
 
     def __init__(self, parent, book, chapters, metadata, *,
                  on_selection_change=None, auto_select=True,
                  mark_duplicates=True, on_play_preview=None):
-        self._init_checkbox_images()
+        self._init_checkbox_images(parent)
         self.parent = parent
         self.book = book
         self.chapters = chapters
@@ -102,7 +110,7 @@ class ChapterTreeView:
         self.preview_info_label = ttk.Label(right, text='', anchor='w')
         self.preview_info_label.pack(fill=tk.X, padx=4, pady=(4, 0))
 
-        self.preview_text = tk.Text(right, wrap=tk.WORD, state=tk.NORMAL,
+        self.preview_text = tk.Text(right, wrap=tk.WORD, state=tk.DISABLED,
                                     font=('Arial', 11))
         preview_vsb = ttk.Scrollbar(right, orient='vertical',
                                     command=self.preview_text.yview)
@@ -117,14 +125,31 @@ class ChapterTreeView:
 
     def _build_tree(self):
         toc = getattr(self.book, 'toc', None)
-        if toc:
+        if isinstance(toc, (list, tuple)) and toc:
             href_to_chapters = self._build_href_map()
             self._process_toc(toc, '', href_to_chapters)
-            # Insert any chapters not referenced by the TOC
-            inserted_ids = set(id(ch) for ch in self._item_to_chapter.values())
+            # Insert any chapters not referenced by the TOC at their SPINE
+            # position — as a sibling right after the nearest preceding
+            # chapter that got a node — not appended at the bottom. Dumping
+            # them at the end made the tree read out of order on books whose
+            # TOC skips real content documents, even though conversion
+            # (spine-sorted) was always correct. Titled by first heading
+            # when one exists; file name otherwise.
+            prev_iid = None
             for ch in self.chapters:
-                if id(ch) not in inserted_ids and ch.extracted_text.strip():
-                    self._insert_chapter_node(ch, None, '')
+                iid = self._chapter_to_item.get(id(ch))
+                if iid is not None:
+                    prev_iid = iid
+                    continue
+                if not ch.extracted_text.strip():
+                    continue
+                if prev_iid is not None:
+                    parent = self.tree.parent(prev_iid)
+                    index = self.tree.index(prev_iid) + 1
+                else:
+                    parent, index = '', 0
+                prev_iid = self._insert_chapter_node(
+                    ch, _extract_heading(ch), parent, index=index)
         else:
             self._build_flat_tree()
 
@@ -147,39 +172,61 @@ class ChapterTreeView:
                     parent_iid, 'end', text=title,
                     image=self._checkbox_images['unchecked'],
                     values=('section', '', 0, 'False', 'False'))
+                # ebooklib puts the parent navPoint's own document href on
+                # the Section itself, not only on its children. A Section
+                # with a truthy href is a real spine document (e.g. a
+                # "Part I" page) — match it against the chapter map the
+                # same way a Link href is matched, and insert it as the
+                # section's own first chapter node, so it isn't lost to
+                # the "leftover chapters" pass at the end of _build_tree.
+                section_href = getattr(section, 'href', '') or ''
+                if section_href:
+                    self._match_and_insert_href(
+                        section_href, title, iid, href_map)
                 self._process_toc(children, iid, href_map)
                 self._update_parent_state(iid)
             else:
                 href = getattr(entry, 'href', '') or ''
                 toc_title = getattr(entry, 'title', None)
-                fname = href.split('#')[0]
-                matched = href_map.get(fname, [])
-                if matched:
-                    ch = matched[0]
-                    if id(ch) not in self._chapter_to_item:
-                        self._insert_chapter_node(ch, toc_title, parent_iid)
-                else:
-                    # Fallback: TOC href and chapter file_name may have
-                    # different path prefixes (OEBPS/, text/, etc.). Match
-                    # on the bare basename, but only with == — substring
-                    # matching falsely conflates ch01.xhtml with ch010.xhtml.
-                    target_base = fname.rsplit('/', 1)[-1] if fname else ''
-                    if target_base:
-                        for ch in self.chapters:
-                            if id(ch) in self._chapter_to_item:
-                                continue
-                            ch_base = ch.file_name.rsplit('/', 1)[-1]
-                            if ch_base == target_base:
-                                self._insert_chapter_node(
-                                    ch, toc_title, parent_iid)
-                                break
+                self._match_and_insert_href(
+                    href, toc_title, parent_iid, href_map)
+
+    def _match_and_insert_href(self, href, toc_title, parent_iid, href_map):
+        """Match a TOC href (from a Link or a chapter-bearing Section)
+        against the chapter map and insert the chapter node under
+        parent_iid. Shared by Link entries and Section.href entries."""
+        # Normalized like epub_parser._build_toc_map: TOC hrefs may be
+        # percent-encoded (spaces, accents) or backslashed (ebooklib's
+        # write_epub on Windows) while chapter.file_name (and the href_map
+        # keyed on it) is not.
+        fname = _toc_href_to_filename(href)
+        matched = href_map.get(fname, [])
+        if matched:
+            ch = matched[0]
+            if id(ch) not in self._chapter_to_item:
+                self._insert_chapter_node(ch, toc_title, parent_iid)
+            return
+        # Fallback: TOC href and chapter file_name may have different path
+        # prefixes (OEBPS/, text/, etc.). Match on the bare basename, but
+        # only with == — substring matching falsely conflates ch01.xhtml
+        # with ch010.xhtml.
+        target_base = fname.rsplit('/', 1)[-1] if fname else ''
+        if target_base:
+            for ch in self.chapters:
+                if id(ch) in self._chapter_to_item:
+                    continue
+                ch_base = ch.file_name.rsplit('/', 1)[-1]
+                if ch_base == target_base:
+                    self._insert_chapter_node(ch, toc_title, parent_iid)
+                    break
 
     def _build_flat_tree(self):
         for ch in self.chapters:
             if ch.extracted_text.strip():
                 self._insert_chapter_node(ch, None, '')
 
-    def _insert_chapter_node(self, chapter, toc_title, parent_iid):
+    def _insert_chapter_node(self, chapter, toc_title, parent_iid,
+                             index='end'):
         display_title = (getattr(chapter, 'display_title', None)
                          or toc_title
                          or chapter.file_name)
@@ -187,29 +234,28 @@ class ChapterTreeView:
         is_empty = not chapter.extracted_text.strip()
 
         iid = self.tree.insert(
-            parent_iid, 'end',
+            parent_iid, index,
             text=display_title,
             image=self._checkbox_images['unchecked'],
             values=('chapter', str(id(chapter)), str(word_count),
                     str(is_empty), 'False'))
         self._item_to_chapter[iid] = chapter
         self._chapter_to_item[id(chapter)] = iid
+        return iid
 
     # ── Duplicate detection ────────────────────────────────────────────
 
     def _detect_duplicates(self):
-        seen = set()
-        for iid, ch in self._item_to_chapter.items():
-            h = _content_hash(ch.extracted_text)
-            if h in seen:
-                title = self.tree.item(iid, 'text')
-                self.tree.item(iid, text=f'{title} (Duplicate)')
-                vals = list(self.tree.item(iid, 'values'))
-                if len(vals) > 4:
-                    vals[4] = 'True'
-                    self.tree.item(iid, values=vals)
-            else:
-                seen.add(h)
+        iids = list(self._item_to_chapter.keys())
+        chapter_list = [self._item_to_chapter[iid] for iid in iids]
+        for idx in find_duplicates(chapter_list):
+            iid = iids[idx]
+            title = self.tree.item(iid, 'text')
+            self.tree.item(iid, text=f'{title} (Duplicate)')
+            vals = list(self.tree.item(iid, 'values'))
+            if len(vals) > 4:
+                vals[4] = 'True'
+                self.tree.item(iid, values=vals)
 
     # ── Auto-select ────────────────────────────────────────────────────
 
@@ -251,6 +297,15 @@ class ChapterTreeView:
             self._update_preview(sel[0])
 
     def _toggle_item(self, iid):
+        vals = self.tree.item(iid, 'values')
+        is_section = not (vals and vals[0] == 'chapter')
+        if (is_section and not self._has_checked_children(iid)
+                and not self._descendant_chapter_states(iid)):
+            # A section with no chapter descendants at all always computes
+            # is_checked=False, so it would re-check on every click and
+            # never actually select anything. Make it a no-op instead of a
+            # permanently-stuck checkbox.
+            return
         is_checked = iid in self._selected or self._has_checked_children(iid)
         new_checked = not is_checked
         self._set_item_state(iid, new_checked)
@@ -289,32 +344,32 @@ class ChapterTreeView:
             self._update_parent_state(parent)
             parent = self.tree.parent(parent)
 
-    def _update_parent_state(self, iid):
-        children = self.tree.get_children(iid)
-        if not children:
-            return
-        all_checked = True
-        any_checked = False
-        for child in children:
-            child_img = str(self.tree.item(child, 'image'))
-            if 'checked' in child_img and 'unchecked' not in child_img:
-                any_checked = True
-            elif 'half' in child_img:
-                any_checked = True
-                all_checked = False
+    def _descendant_chapter_states(self, iid):
+        """Checked-state of every chapter under iid (recursing sections)."""
+        states = []
+        for child in self.tree.get_children(iid):
+            vals = self.tree.item(child, 'values')
+            if vals and vals[0] == 'chapter':
+                states.append(child in self._selected)
             else:
-                all_checked = False
-            if child in self._selected:
-                any_checked = True
-            if self._has_checked_children(child):
-                any_checked = True
+                states.extend(self._descendant_chapter_states(child))
+        return states
 
-        if all_checked and any_checked:
-            self.tree.item(iid, image=self._checkbox_images['checked'])
-        elif any_checked:
-            self.tree.item(iid, image=self._checkbox_images['half'])
+    def _update_parent_state(self, iid):
+        # Derive the section state from the selection set, not from
+        # tree.item(child, 'image') string matching — Tk reports image names
+        # like 'pyimage3', so comparing against 'checked'/'half' never
+        # matched and fully-selected sections rendered as indeterminate.
+        states = self._descendant_chapter_states(iid)
+        if not states:
+            return
+        if all(states):
+            img = self._checkbox_images['checked']
+        elif any(states):
+            img = self._checkbox_images['half']
         else:
-            self.tree.item(iid, image=self._checkbox_images['unchecked'])
+            img = self._checkbox_images['unchecked']
+        self.tree.item(iid, image=img)
 
     def _refresh_all_parents(self):
         def refresh(iid):
@@ -342,6 +397,7 @@ class ChapterTreeView:
             self.preview_text.config(state=tk.NORMAL)
             self.preview_text.delete('1.0', tk.END)
             self.preview_text.insert('1.0', f'Section: {title}')
+            self.preview_text.config(state=tk.DISABLED)
             self.preview_info_label.config(text='')
             self._selected_preview_chapter = None
             if self.play_button is not None:
@@ -360,6 +416,7 @@ class ChapterTreeView:
         self.preview_text.config(state=tk.NORMAL)
         self.preview_text.delete('1.0', tk.END)
         self.preview_text.insert('1.0', text)
+        self.preview_text.config(state=tk.DISABLED)
         word_str = 'word' if word_count == 1 else 'words'
         self.preview_info_label.config(text=f'{word_count:,} {word_str}')
         self._selected_preview_chapter = chapter
@@ -384,6 +441,7 @@ class ChapterTreeView:
         self.preview_text.delete('1.0', tk.END)
         self.preview_text.insert(
             '1.0', '\n'.join(lines) if lines else 'No metadata available')
+        self.preview_text.config(state=tk.DISABLED)
         self.preview_info_label.config(text='Book Info')
         self._selected_preview_chapter = None
         if self.play_button is not None:

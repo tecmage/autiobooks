@@ -12,14 +12,16 @@ from PIL import Image, ImageTk
 from pathlib import Path
 from .engine import get_gpu_acceleration_available, gen_audio_segments
 from .engine import set_gpu_acceleration, convert_text_to_wav_file
-from .engine import create_m4b, encode_chapter_to_m4a
-from .engine import concat_audio_files, unlink_with_retry
+from .engine import unlink_with_retry
 from .engine import convert_chapters_to_wav
-from .engine import safe_stem, chapter_wav_name
+from .engine import safe_stem, chapter_wav_name, render_key, assemble_output
+from .engine import find_chapter_wavs
+from .engine import try_begin_conversion, end_conversion, is_conversion_active
 from .runtime import ensure_cuda
 from .epub_parser import (
     get_book, get_book_cached, get_title, get_author, get_cover_image,
     get_chapter_titles, get_publisher, get_publication_year, get_description,
+    clear_chapter_cache,
 )
 from .theme import THEMES, apply_theme as _apply_theme_impl, get_current_theme
 from .dialogs import (
@@ -30,9 +32,9 @@ from .dialogs import (
 )
 from .batch_window import show_batch_window as _show_batch_window_impl
 from .chapter_tree import ChapterTreeView
-from .pdf_parser import get_pdf_book
+from .pdf_parser import get_pdf_book, get_pdf_cover_bytes
 from .text_processing import normalize_text
-from .config import load_config, save_config
+from .config import load_config, save_config, sanitize_dict_list
 import pygame.mixer
 import soundfile
 import numpy as np
@@ -42,7 +44,8 @@ import os
 from . import voices_lang
 from .voices_lang import voices, voices_emojified, deemojify_voice, get_language_from_voice
 
-PREVIEW_FILE = os.path.join(tempfile.gettempdir(), "autiobooks_preview.wav")
+PREVIEW_FILE = os.path.join(
+    tempfile.gettempdir(), f"autiobooks_preview_{os.getpid()}.wav")
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -51,8 +54,31 @@ except ImportError:
     HAS_DND = False
 
 
+import atexit
 import contextlib
 import subprocess as _subprocess
+
+# Live sleep-inhibitor children (caffeinate / systemd-inhibit). Conversion
+# workers are daemon threads, and CPython kills daemon threads at interpreter
+# exit WITHOUT running their finally blocks — so prevent_sleep's own cleanup
+# never fires when the user quits mid-conversion, and the 'sleep infinity'
+# child would hold the idle inhibitor until reboot. This atexit hook is the
+# backstop that runs on every normal interpreter shutdown.
+_sleep_inhibitors = set()
+
+
+def _terminate_sleep_inhibitors():
+    procs = list(_sleep_inhibitors)
+    _sleep_inhibitors.clear()
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_terminate_sleep_inhibitors)
+
 
 @contextlib.contextmanager
 def prevent_sleep():
@@ -90,6 +116,8 @@ def prevent_sleep():
                 stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL)
         except (OSError, FileNotFoundError):
             pass
+    if _proc is not None:
+        _sleep_inhibitors.add(_proc)
     try:
         yield
     finally:
@@ -100,6 +128,7 @@ def prevent_sleep():
             except Exception:
                 pass
         if _proc is not None:
+            _sleep_inhibitors.discard(_proc)
             try:
                 _proc.terminate()
                 _proc.wait(timeout=5)
@@ -133,6 +162,26 @@ class BatchJob:
     status: str = "Queued"
 
 
+def format_duration_estimate(words, speed):
+    """Return a human display string for the estimated audio duration of
+    `words` words read at `speed`.
+
+    Kokoro reads roughly 150 words per minute at speed 1.0; `speed` scales
+    that linearly (2.0 halves the duration, 0.5 doubles it). Pure function
+    so it can be unit-tested without a Tk root.
+    """
+    if speed <= 0:
+        speed = 1.0
+    minutes = words / (150 * speed)
+    if minutes < 1:
+        return '~<1 min'
+    if minutes < 60:
+        return f'~{round(minutes)} min'
+    total_min = round(minutes)
+    h, m = divmod(total_min, 60)
+    return f'~{h}h {m}m'
+
+
 def add_tooltip(widget, text):
     tip = None
 
@@ -144,7 +193,8 @@ def add_tooltip(widget, text):
         tip = tk.Toplevel(widget)
         tip.wm_overrideredirect(True)
         tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(tip, text=text, background=colors['tooltip_bg'],
+        tip_text = text() if callable(text) else text
+        tk.Label(tip, text=tip_text, background=colors['tooltip_bg'],
                  foreground=colors['tooltip_fg'], relief="solid",
                  borderwidth=1, font=('Arial', 10)).pack()
 
@@ -156,6 +206,46 @@ def add_tooltip(widget, text):
 
     widget.bind("<Enter>", show_tip, add=True)
     widget.bind("<Leave>", hide_tip, add=True)
+
+
+def _set_bool_var(var, value):
+    """Coerce a config value into a BooleanVar, keeping the current default
+    on failure. tkinter.BooleanVar.set() runs the value through Tk's
+    getboolean() internally, so a hand-edited config holding a non-boolean
+    (e.g. "enabled", None) raises TclError/TypeError there — before any
+    window exists — unless caught here."""
+    try:
+        var.set(value)
+    except (tk.TclError, TypeError):
+        pass  # keep the code default
+
+
+def _configure_audio_driver():
+    """Pick an SDL audio driver for pygame.mixer on headless/WSL Linux hosts.
+
+    On a WSL or headless server with no ALSA sound card, SDL falls back to
+    ALSA and prints 'cannot find card 0' warnings to stderr before
+    pygame.mixer.init() raises. This picks a driver up front to avoid that:
+    WSLg's PulseAudio when it's present (so preview audio still plays),
+    otherwise SDL's 'dummy' driver (silent — preview is disabled gracefully
+    by the caller's except). A user-set SDL_AUDIODRIVER always wins, and a
+    normal Linux desktop with a real card is left untouched so SDL can
+    autodetect. No-op on non-Linux platforms."""
+    if os.environ.get('SDL_AUDIODRIVER'):
+        return  # respect an explicit user override
+    if sys.platform != 'linux':
+        return
+    # WSLg exposes a PulseAudio server; prefer it so preview audio works.
+    if os.environ.get('PULSE_SERVER') or os.path.exists('/mnt/wslg/PulseServer'):
+        os.environ['SDL_AUDIODRIVER'] = 'pulseaudio'
+        return
+    try:
+        with open('/proc/asound/cards', encoding='utf-8') as f:
+            cards = f.read()
+    except OSError:
+        cards = ''  # ALSA not loaded at all → treat as cardless
+    if not cards.strip() or 'no soundcards' in cards.lower():
+        os.environ['SDL_AUDIODRIVER'] = 'dummy'
 
 
 def start_gui():
@@ -182,15 +272,26 @@ def start_gui():
     style.configure('.', font=('Arial', 12))
 
     # check ffmpeg is installed
+    # sys.exit, not the builtin exit(): site.py (which defines exit) is not
+    # loaded in PyInstaller builds, so exit() would NameError there.
     if sys.platform == 'win32':
         from .runtime import ensure_ffmpeg
         if not ensure_ffmpeg(root):
-            exit(1)
-    elif not shutil.which('ffmpeg'):
-        messagebox.showwarning("Warning",
-                               "ffmpeg not found. Please install ffmpeg to" +
-                               " create m4b audiobook files.")
-        exit(1)
+            sys.exit(1)
+    else:
+        # ffprobe is required on every convert path, not just m4b: it
+        # supplies chapter durations for m4b markers and the progress
+        # total for the non-m4b concat path. ffmpeg-only used to pass
+        # this gate and hit _safe_probe_duration returning 0.0 (every
+        # chapter marker at t=0) only after a full TTS run.
+        missing = [b for b in ('ffmpeg', 'ffprobe') if shutil.which(b) is None]
+        if missing:
+            messagebox.showwarning(
+                "Warning",
+                f"{' and '.join(missing)} not found. Please install "
+                f"{'it' if len(missing) == 1 else 'them'} to create "
+                "m4b audiobook files.")
+            sys.exit(1)
 
     # Row 1: Voice, speed, and gap settings
     settings_row1 = tk.Frame(root)
@@ -422,7 +523,7 @@ def start_gui():
 
     theme_var = tk.StringVar(value='light')
     pref_heteronyms = tk.BooleanVar(value=True)
-    pref_contractions = tk.BooleanVar(value=True)
+    pref_contractions = tk.BooleanVar(value=False)
     pref_auto_select = tk.BooleanVar(value=True)
     pref_mark_duplicates = tk.BooleanVar(value=True)
     pref_auto_acronyms = tk.BooleanVar(value=False)
@@ -474,6 +575,13 @@ def start_gui():
 
     def on_detect_titles_changed(*_):
         state = 'disabled' if detect_titles.get() else 'normal'
+        if state == 'disabled' and not check_chapter_range():
+            # Normalize before locking the field, otherwise a stale invalid
+            # value (e.g. "" left mid-edit) permanently blocks Convert with
+            # no way to fix it short of unticking this same checkbox.
+            chapter_entry.delete(0, tk.END)
+            chapter_entry.insert(0, '1')
+            chapter_entry.configure(foreground='')
         chapter_entry.configure(state=state)
 
     detect_titles.trace_add('write', on_detect_titles_changed)
@@ -505,7 +613,7 @@ def start_gui():
         gpu_acceleration.set(True)
     set_gpu_acceleration(gpu_acceleration.get())
     if 'detect_titles' in config:
-        detect_titles.set(config['detect_titles'])
+        _set_bool_var(detect_titles, config['detect_titles'])
     if config.get('bitrate') in ('64k', '128k', '192k'):
         bitrate_combo.set(config['bitrate'])
     if config.get('vbr'):
@@ -514,7 +622,7 @@ def start_gui():
         format_combo.set(config['output_format'])
         on_format_changed()
     if 'read_title_author' in config:
-        read_title_author_bool.set(config['read_title_author'])
+        _set_bool_var(read_title_author_bool, config['read_title_author'])
     starting_ch_cfg = config.get('starting_chapter')
     if starting_ch_cfg:
         try:
@@ -534,24 +642,30 @@ def start_gui():
     last_directory = _validated_dir(config.get('last_directory', ''))
     last_output_directory = _validated_dir(
         config.get('last_output_directory', ''))
-    word_substitutions = config.get('word_substitutions', [])
-    phoneme_overrides = config.get('phoneme_overrides', [])
+    word_substitutions = sanitize_dict_list(
+        config.get('word_substitutions', []), str_keys=('find', 'replace'))
+    phoneme_overrides = sanitize_dict_list(
+        config.get('phoneme_overrides', []), str_keys=('word', 'ipa'))
     if config.get('theme') in THEMES:
         theme_var.set(config['theme'])
         apply_theme(config['theme'])
     if 'heteronyms' in config:
-        pref_heteronyms.set(config['heteronyms'])
+        _set_bool_var(pref_heteronyms, config['heteronyms'])
     if 'contractions' in config:
-        pref_contractions.set(config['contractions'])
+        _set_bool_var(pref_contractions, config['contractions'])
     if 'auto_select' in config:
-        pref_auto_select.set(config['auto_select'])
+        _set_bool_var(pref_auto_select, config['auto_select'])
     if 'mark_duplicates' in config:
-        pref_mark_duplicates.set(config['mark_duplicates'])
+        _set_bool_var(pref_mark_duplicates, config['mark_duplicates'])
     if 'auto_acronyms' in config:
-        pref_auto_acronyms.set(config['auto_acronyms'])
+        _set_bool_var(pref_auto_acronyms, config['auto_acronyms'])
 
     def get_current_config():
-        return {
+        # Start from what's on disk so keys written by other components
+        # (runtime.py's cuda_download_opted_out, future fields) survive the
+        # GUI's full-dict saves instead of being silently dropped.
+        cfg = load_config()
+        cfg.update({
             'voice': voice_combo.get(),
             'speed': speed_entry.get(),
             'chapter_gap': gap_entry.get(),
@@ -572,9 +686,28 @@ def start_gui():
             'auto_select': pref_auto_select.get(),
             'mark_duplicates': pref_mark_duplicates.get(),
             'auto_acronyms': pref_auto_acronyms.get(),
-        }
+        })
+        return cfg
 
     def on_close():
+        if is_conversion_active():
+            if not messagebox.askyesno(
+                    "Quit",
+                    "A conversion is still running. Quit anyway?\n"
+                    "Completed chapters are kept — the next run can resume "
+                    "from them."):
+                return
+            cancel_event.set()
+            # The batch worker polls its own event, not cancel_event. Note
+            # the cancel signals are best-effort: root.destroy() below ends
+            # mainloop and interpreter teardown kills the daemon workers
+            # mid-chapter WITHOUT running their finally blocks — nothing
+            # waits for a chapter boundary. Atomic .part writes bound the
+            # file damage, and the atexit hook (_terminate_sleep_inhibitors)
+            # reaps the sleep-inhibitor child the worker's finally would
+            # have terminated.
+            from .batch_window import cancel_active_batch
+            cancel_active_batch()
         if audio_available:
             pygame.mixer.music.stop()
             try:
@@ -602,11 +735,13 @@ def start_gui():
             get_substitutions=lambda: word_substitutions,
             get_phoneme_overrides=lambda: phoneme_overrides,
             get_auto_acronyms=lambda: pref_auto_acronyms.get(),
+            is_preview_active=lambda: generating_preview,
         )
 
     ttk.Separator(root, orient='horizontal').pack(fill='x', padx=5, pady=2)
 
     audio_available = False
+    _configure_audio_driver()
     try:
         pygame.mixer.init()
         pygame.mixer.music.set_volume(0.7)
@@ -650,6 +785,15 @@ def start_gui():
         if generating_preview:
             return
 
+        if is_conversion_active():
+            # TTS previews share the pipeline cache and the process-global
+            # torch device with the conversion worker; running both at once
+            # risks the mixed-device crash documented in CLAUDE.md.
+            messagebox.showinfo(
+                "Preview",
+                "Preview is unavailable while a conversion is running.")
+            return
+
         if playing_sample:
             if audio_available:
                 pygame.mixer.music.stop()
@@ -666,32 +810,68 @@ def start_gui():
         if not text:
             return
 
+        if not check_speed_range():
+            messagebox.showwarning(
+                "Warning",
+                "Please enter a speed value between 0.5 and 2.0.")
+            return
         voice = deemojify_voice(voice_combo.get())
         speed = float(speed_entry.get())
 
-        text = normalize_text(text, lang=get_language_from_voice(voice),
-                              substitutions=word_substitutions,
-                              heteronyms=pref_heteronyms.get(),
-                              contractions=pref_contractions.get(),
-                              phoneme_overrides=phoneme_overrides,
-                              auto_acronyms=pref_auto_acronyms.get())
+        # Snapshot every Tk-held setting on the main thread; normalize_text
+        # itself (lazy spaCy load, seconds on the first call) runs inside
+        # the worker below so it doesn't freeze the UI.
+        lang = get_language_from_voice(voice)
+        subs_snapshot = word_substitutions
+        overrides_snapshot = phoneme_overrides
+        heteronyms_enabled = pref_heteronyms.get()
+        contractions_enabled = pref_contractions.get()
+        auto_acronyms_enabled = pref_auto_acronyms.get()
+        raw_text = text
         generating_preview = True
         play_label.config(text="...")
 
         def generate():
-            nonlocal generating_preview
+            def _finish(label_text=None):
+                # Main-thread only: clear the in-flight flag once the UI
+                # has actually taken over (playback started or the error
+                # was shown). Clearing it in the worker's finally opened a
+                # gap where a click saw both flags false and spawned a
+                # second generation against the same preview file.
+                nonlocal generating_preview
+                generating_preview = False
+                if label_text is not None:
+                    play_label.config(text=label_text)
+
             try:
+                text = normalize_text(raw_text, lang=lang,
+                                      substitutions=subs_snapshot,
+                                      heteronyms=heteronyms_enabled,
+                                      contractions=contractions_enabled,
+                                      phoneme_overrides=overrides_snapshot,
+                                      auto_acronyms=auto_acronyms_enabled)
                 audio_segments = gen_audio_segments(text, voice, speed,
                                                     split_pattern=r"")
+                if not audio_segments:
+                    root.after(0, lambda: messagebox.showinfo(
+                        "Preview", "Nothing to preview in this chapter."))
+                    root.after(0, lambda: _finish("▶️"))
+                    return
                 final_audio = np.concatenate(audio_segments)
                 soundfile.write(PREVIEW_FILE, final_audio, 24000)
-                root.after(0, lambda: play_preview(play_label))
+
+                def _start_playback():
+                    _finish()
+                    play_preview(play_label)
+                root.after(0, _start_playback)
             except Exception as e:
-                root.after(0, lambda: messagebox.showerror(
-                    "Preview Error", f"Failed to generate preview:\n{e}"))
-                root.after(0, lambda: play_label.config(text="▶️"))
-            finally:
-                generating_preview = False
+                # Default-arg capture: Python deletes `e` when the except
+                # block exits, so a plain closure raises NameError when the
+                # callback runs later on the main thread — the user never
+                # saw the preview failure.
+                root.after(0, lambda err=e: messagebox.showerror(
+                    "Preview Error", f"Failed to generate preview:\n{err}"))
+                root.after(0, lambda: _finish("▶️"))
 
         threading.Thread(target=generate, daemon=True).start()
 
@@ -708,11 +888,22 @@ def start_gui():
     def play_preview(play_label):
         global playing_sample
         if not audio_available or not Path(PREVIEW_FILE).exists():
-            play_label.config(text="▶️")
+            try:
+                play_label.config(text="▶️")
+            except tk.TclError:
+                pass
             return
         _cancel_preview_poll()
+        # Touch the widget BEFORE setting playing_sample: if a book load
+        # destroyed the tree while the preview was generating, the config
+        # raises here — bailing out with the flag still False, instead of
+        # leaving it stuck True with nothing playing (which made the next
+        # preview click get swallowed by the stop branch).
+        try:
+            play_label.config(text="⏹️")
+        except tk.TclError:
+            return
         playing_sample = True
-        play_label.config(text="⏹️")
         pygame.mixer.music.load(PREVIEW_FILE)
         pygame.mixer.music.play()
 
@@ -735,18 +926,46 @@ def start_gui():
             messagebox.showwarning("Warning",
                                    "Please select a book file first.")
             return
+        # Validate now — a bad value stored on the job would only surface
+        # as a cryptic float() error when the batch reaches it.
+        if not check_speed_range():
+            messagebox.showwarning(
+                "Warning",
+                "Please enter a speed value between 0.5 and 2.0.")
+            return
+        if not check_gap_range():
+            messagebox.showwarning(
+                "Warning",
+                "Please enter a chapter gap between 0.0 and 10.0.")
+            return
+
+        if not check_chapter_range():
+            messagebox.showwarning(
+                "Warning",
+                "Please enter a starting chapter number between 0 and 99999.")
+            return
 
         selected_indices = []
         for i, chapter in enumerate(chapters):
             if chapter in checkbox_vars and checkbox_vars[chapter].get():
                 selected_indices.append(i)
+        # No "empty means all" fallback: cli.py hard-errors on an empty
+        # selection, and after the Clear All button (commit 9af6e90) an
+        # empty selection is a deliberate click, not an accident.
         if not selected_indices:
-            selected_indices = list(range(len(chapters)))
+            messagebox.showwarning("Warning", "No chapters selected.")
+            return
 
         titles = None
         if detect_titles.get():
             selected_chs = [chapters[i] for i in selected_indices]
-            titles = get_chapter_titles(book, selected_chs)
+            if current_file_path.lower().endswith('.pdf'):
+                # PDFs carry their titles on the chapter objects; the epub
+                # TOC lookup would return '' for every chapter.
+                titles = [getattr(ch, 'display_title', None)
+                          for ch in selected_chs]
+            else:
+                titles = get_chapter_titles(book, selected_chs)
 
         try:
             starting_ch = int(chapter_entry.get())
@@ -787,18 +1006,37 @@ def start_gui():
 
     def load_book_file(file_path):
         nonlocal last_directory, current_file_path, chapter_tree_view
-        current_file_path = file_path
-        file_label.config(text=Path(file_path).name)
-        add_tooltip(file_label, file_path)
         global book
+        if is_conversion_active():
+            messagebox.showwarning(
+                "Warning",
+                "Cannot load a book while a conversion is running.")
+            return
         is_pdf = file_path.lower().endswith('.pdf')
 
-        if is_pdf:
-            book, chapters_from_book, book_cover = get_pdf_book(
-                file_path, True)
-        else:
-            book, chapters_from_book, book_cover = get_book_cached(
-                file_path, True)
+        # Parse BEFORE committing any state: a corrupt file must leave the
+        # previously-loaded book fully intact (label, chapters, tree).
+        try:
+            if is_pdf:
+                new_book, chapters_from_book, book_cover = get_pdf_book(
+                    file_path, True)
+            else:
+                new_book, chapters_from_book, book_cover = get_book_cached(
+                    file_path, True)
+        except Exception as e:
+            messagebox.showerror(
+                "Error", f"Could not open {Path(file_path).name}:\n{e}")
+            return
+
+        # Evict the previous book's cache entry — the cache pins the full
+        # parsed EpubBook plus every chapter's text, so without eviction a
+        # session that browses many books grows memory monotonically.
+        if current_file_path and current_file_path != file_path:
+            clear_chapter_cache(current_file_path)
+
+        book = new_book
+        current_file_path = file_path
+        file_label.config(text=Path(file_path).name)
 
         book_title = get_title(book)
         book_author = get_author(book)
@@ -818,12 +1056,33 @@ def start_gui():
             titles = get_chapter_titles(book, chapters_from_book)
             for ch, title in zip(chapters_from_book, titles):
                 ch.display_title = title or ch.file_name
-        else:
+        elif is_pdf:
+            # PDF chapters carry their outline titles; only fill gaps.
             for ch in chapters_from_book:
                 if not getattr(ch, 'display_title', None):
                     ch.display_title = ch.file_name
+        else:
+            # Cached EPUB chapter objects may carry display_titles detected
+            # on an earlier load with the setting on — reset unconditionally
+            # so toggling "detect titles" off actually takes effect.
+            for ch in chapters_from_book:
+                ch.display_title = ch.file_name
         chapters.clear()
         chapters.extend(chapters_from_book)
+
+        # Stop any in-flight preview BEFORE destroying the tree that owns
+        # its play button: the poll chain's completion callback would
+        # otherwise fire against the destroyed widget, and (pre-fix) skip
+        # the pygame unload + temp-WAV unlink, wedging previews on Windows.
+        global playing_sample
+        if playing_sample:
+            try:
+                pygame.mixer.music.stop()
+                pygame.mixer.music.unload()
+            except Exception:
+                pass
+            playing_sample = False
+        _cancel_preview_poll()
 
         # Replace old tree view
         if chapter_tree_view:
@@ -845,6 +1104,10 @@ def start_gui():
             mark_duplicates=pref_mark_duplicates.get(),
             on_play_preview=(handle_chapter_click
                              if audio_available else None))
+        # Always resync — with auto-select off the ChapterTreeView ctor never
+        # fires on_selection_change, which would leave checkbox_vars (and the
+        # summary footer) holding the PREVIOUS book's chapters.
+        _sync_checkbox_vars_from_tree()
 
         # Remember directory
         last_directory = str(Path(file_path).parent)
@@ -881,56 +1144,44 @@ def start_gui():
     def convert():
         def enable_controls():
             speed_entry.configure(state='normal')
-            voice_combo.configure(state='normal')
+            # The combo was created readonly; 'normal' would let users type
+            # arbitrary text into it after the first conversion.
+            voice_combo.configure(state='readonly')
+            file_button.configure(state='normal')
+            clear_wavs_button.configure(state='normal')
+            add_to_batch_button.configure(state='normal')
+            cancel_button.configure(state='normal')
             cancel_button.pack_forget()
             start_convert_button.pack(side=tk.RIGHT, padx=5)
             progress['value'] = 0
 
         def run_conversion(resume=False):
+            # Every Tk variable was read on the MAIN thread in convert() and
+            # snapshotted into closure locals; this worker never touches
+            # widgets, and a book loaded later can't swap state under a
+            # running conversion (it keeps book_snapshot/chapters_selected).
             wav_files = []
-            all_chapter_wav_files = []
             all_chapter_m4a_files = []
             encode_futures = {}  # wav_filename -> (Future, m4a_filename)
             encode_executor = ThreadPoolExecutor(max_workers=1)
             conversion_success = False
             try:
-                chapters_selected = [chapter
-                                     for chapter, var in checkbox_vars.items()
-                                     if var.get()]
-                if not chapters_selected:
-                    if chapter_tree_view:
-                        chapter_tree_view.select_all()
-                    chapters_selected = list(checkbox_vars.keys())
-                set_gpu_acceleration(gpu_acceleration.get())
+                set_gpu_acceleration(gpu_enabled)
                 filename = Path(file_path).name
                 wav_dir = Path(file_path).parent
                 safe = safe_stem(Path(filename).stem, wav_dir)
-                out_fmt = format_combo.get()
-                enc_ext = '.m4a' if out_fmt == 'm4b' else fmt_info['ext']
-                try:
-                    chapter_num = int(chapter_entry.get())
-                except ValueError:
-                    root.after(0, lambda: messagebox.showerror(
-                        "Error", "Invalid chapter number."))
-                    return
                 title = title_override
                 creator = author_override
-                if detect_titles.get():
+                if detect_titles_enabled:
                     if file_path.lower().endswith('.pdf'):
                         chapter_titles = [
                             getattr(ch, 'display_title', None)
                             for ch in chapters_selected]
                     else:
                         chapter_titles = get_chapter_titles(
-                            book, chapters_selected)
+                            book_snapshot, chapters_selected)
                 else:
                     chapter_titles = None
-                try:
-                    chapter_gap = float(gap_entry.get())
-                except ValueError:
-                    root.after(0, lambda: messagebox.showerror(
-                        "Error", "Invalid chapter gap value."))
-                    return
                 steps = len(chapters_selected) + 1
 
                 # ETA tracking
@@ -938,7 +1189,8 @@ def start_gui():
                                for ch in chapters_selected]
                 total_words = sum(word_counts)
                 eta_state = {'words_done': 0, 'start_time': time.time(),
-                             'current_step': 1}
+                             'current_step': 0,
+                             'words_remaining': total_words}
                 resumed_indices = set()
 
                 def set_progress(value):
@@ -950,6 +1202,13 @@ def start_gui():
                 def on_chapter_start(i, total, text, is_resume):
                     if is_resume:
                         resumed_indices.add(i)
+                        # Resumed-from-disk and duplicate-reuse chapters
+                        # cost ~0 wall clock (engine.py submits/reuses an
+                        # encode future with no synthesis) — excluding
+                        # their words from the remaining-work total here
+                        # keeps the words/sec rate from being computed
+                        # against instantaneous "free" progress.
+                        eta_state['words_remaining'] -= word_counts[i - 1]
                         set_status(
                             f"Skipping chapter {i} (already converted)")
                         return
@@ -958,8 +1217,7 @@ def start_gui():
                     if eta_state['words_done'] > 0 and elapsed > 0:
                         wps = eta_state['words_done'] / elapsed
                         if wps > 0:
-                            remaining = (
-                                (total_words - eta_state['words_done']) / wps)
+                            remaining = eta_state['words_remaining'] / wps
                             if remaining >= 60:
                                 eta_str = f" (~{int(remaining / 60)} min remaining)"
                             else:
@@ -977,7 +1235,13 @@ def start_gui():
                     if duration is None and i not in resumed_indices:
                         print(f"Chapter {i}: conversion returned no audio",
                               file=sys.stderr)
-                    eta_state['words_done'] += word_counts[i - 1]
+                    # Resumed/duplicate chapters already had their words
+                    # dropped from words_remaining in on_chapter_start;
+                    # crediting them to words_done here too would double
+                    # count and (re-)poison the words/sec rate.
+                    if i not in resumed_indices:
+                        eta_state['words_done'] += word_counts[i - 1]
+                        eta_state['words_remaining'] -= word_counts[i - 1]
                     eta_state['current_step'] += 1
                     set_progress((eta_state['current_step'] / steps) * 100)
 
@@ -991,20 +1255,17 @@ def start_gui():
                         "Conversion Error",
                         f"Chapter {idx} failed:\n{err}"))
                     eta_state['words_done'] += word_counts[i - 1]
+                    eta_state['words_remaining'] -= word_counts[i - 1]
                     eta_state['current_step'] += 1
                     set_progress((eta_state['current_step'] / steps) * 100)
 
                 chapter_texts = []
                 for i, chapter in enumerate(chapters_selected, start=1):
                     text = chapter.extracted_text
-                    if i == 1 and read_title_author_bool.get():
+                    if i == 1 and read_title_author_enabled:
                         text = f"{title} by {creator}.\n{text}"
                     chapter_texts.append(text)
 
-                all_chapter_wav_files = [
-                    chapter_wav_name(safe, t, wav_dir)
-                    for t in chapter_texts
-                ]
                 all_chapter_m4a_files = [
                     str(wav_dir / f'{safe}_chapter_{i}_enc{enc_ext}')
                     for i in range(1, len(chapter_texts) + 1)
@@ -1014,13 +1275,13 @@ def start_gui():
                     chapter_texts, voice, speed, wav_dir,
                     safe, encode_executor,
                     out_format=out_fmt,
-                    bitrate=bitrate_combo.get(), vbr=use_vbr.get(),
+                    bitrate=bitrate_value, vbr=vbr_enabled,
                     chapter_gap=chapter_gap,
-                    substitutions=word_substitutions,
-                    phoneme_overrides=phoneme_overrides,
-                    auto_acronyms=pref_auto_acronyms.get(),
-                    heteronyms=pref_heteronyms.get(),
-                    contractions=pref_contractions.get(),
+                    substitutions=subs_snapshot,
+                    phoneme_overrides=overrides_snapshot,
+                    auto_acronyms=auto_acronyms_enabled,
+                    heteronyms=heteronyms_enabled,
+                    contractions=contractions_enabled,
                     resume=resume,
                     cancel_check=cancel_event.is_set,
                     on_chapter_start=on_chapter_start,
@@ -1042,37 +1303,31 @@ def start_gui():
                 # Wait for any background encoding still in progress, then
                 # collect the encoded paths in wav_files order.
                 set_status(f"Creating {out_fmt} file... 0%")
-                encoded_files = []
-                for wav_name in wav_files:
-                    future, enc_name = encode_futures[wav_name]
-                    future.result()
-                    encoded_files.append(enc_name)
-
+                # Cancel can't interrupt the ffmpeg assembly stage — grey it
+                # out so the button doesn't pretend otherwise.
+                root.after(0, lambda: cancel_button.configure(
+                    state='disabled'))
                 def assembly_progress(pct):
                     set_status(f"Creating {out_fmt} file... {pct}%")
+                    # `steps` reserves the final 1/steps slot of the bar
+                    # for this stage (current_step tops out at steps - 1
+                    # after the last chapter) — drive the bar across that
+                    # reserved slot instead of leaving it sitting at 100%
+                    # for the whole mux, which could run for minutes on a
+                    # long book.
+                    set_progress(((steps - 1) / steps) * 100
+                                + (pct / 100) * (100 / steps))
 
-                if out_fmt == 'm4b':
-                    converted_titles = []
-                    for i, chapter in enumerate(chapters_selected):
-                        wav_name = chapter_wav_name(
-                            safe, chapter_texts[i], wav_dir)
-                        if wav_name in wav_files:
-                            if chapter_titles is not None:
-                                converted_titles.append(chapter_titles[i])
-                    if file_path.lower().endswith('.pdf'):
-                        cover_image_full = None
-                    else:
-                        cover_image_full = get_cover_image(book, False)
-                    create_m4b(encoded_files, output_path, cover_image_full,
-                               title, creator, chapter_num,
-                               converted_titles or None,
-                               progress_callback=assembly_progress,
-                               preencoded=True,
-                               bitrate=bitrate_combo.get(),
-                               vbr=use_vbr.get())
+                if file_path.lower().endswith('.pdf'):
+                    cover_image_full = get_pdf_cover_bytes(file_path)
                 else:
-                    concat_audio_files(encoded_files, output_path,
-                                       progress_callback=assembly_progress)
+                    cover_image_full = get_cover_image(book_snapshot, False)
+                assemble_output(result, chapter_texts, chapter_titles,
+                                safe, wav_dir, out_fmt, output_path,
+                                cover_image_full, title, creator,
+                                starting_chapter=chapter_num,
+                                bitrate=bitrate_value, vbr=vbr_enabled,
+                                progress_callback=assembly_progress)
                 set_status("Conversion complete")
                 conversion_success = True
             except Exception as e:
@@ -1083,7 +1338,11 @@ def start_gui():
                 # Wait for any background encoding threads before touching files
                 encode_executor.shutdown(wait=True)
                 if conversion_success:
-                    for wav_file in all_chapter_wav_files:
+                    # Stem-wide sweep: exact current-key paths would orphan
+                    # WAVs left by a cancelled run under different settings
+                    # (other render_key, other filenames). Cancel/failure
+                    # never reach this branch — WAVs are kept for resume.
+                    for wav_file in find_chapter_wavs(safe, wav_dir):
                         err = unlink_with_retry(wav_file)
                         if err is not None:
                             print(f"Warning: could not remove {wav_file}: {err}",
@@ -1093,18 +1352,72 @@ def start_gui():
                     if err is not None:
                         print(f"Warning: could not remove {m4a_file}: {err}",
                               file=sys.stderr)
-                # On cancel/failure, keep wav files for resume
+                # On cancel/failure, keep wav files for resume.
+                # enable_controls is scheduled by _run_with_sleep_prevention's
+                # finally — AFTER end_conversion() releases the slot, so the
+                # Convert button can't reappear while the slot is still held
+                # (clicking in that window hit a spurious "already running"
+                # warning).
                 cancel_event.clear()
-                root.after(0, enable_controls)
+
+        if is_conversion_active():
+            messagebox.showwarning(
+                "Warning",
+                "A conversion is already running (here or in the batch "
+                "queue). Wait for it to finish first.")
+            return
+
+        if generating_preview:
+            # The preview thread is inside the shared TTS pipeline; the
+            # worker's set_gpu_acceleration() flips the process-global
+            # torch device under it.
+            messagebox.showwarning(
+                "Warning",
+                "Wait for the chapter preview to finish generating first.")
+            return
 
         if not check_speed_range():
             messagebox.showwarning("Warning",
                                    "Please enter a speed value between 0.5 and 2.0.")
             return
 
+        if not check_gap_range():
+            messagebox.showwarning(
+                "Warning",
+                "Please enter a chapter gap between 0.0 and 10.0.")
+            return
+
+        if not check_chapter_range():
+            messagebox.showwarning(
+                "Warning",
+                "Please enter a starting chapter number between 0 and 99999.")
+            return
+
         if not current_file_path:
             messagebox.showwarning("Warning",
                                    "Please select a book file first.")
+            return
+
+        # No "empty selection means convert everything" fallback here:
+        # cli.py hard-errors on an empty selection, and after the Clear All
+        # button (commit 9af6e90) an empty selection is a deliberate click,
+        # not an accident. `chapters` (the full book list) is checked here
+        # instead of checkbox_vars, which only ever holds TICKED chapters —
+        # an empty selection must fall through to the "No chapters
+        # selected." guard below, not read as "book has zero chapters".
+        if not chapters:
+            messagebox.showwarning("Warning",
+                                   "No chapters available to convert.")
+            return
+
+        # Checked before the save dialog so a Clear-All-then-Convert click
+        # is told "no chapters selected" immediately, instead of first being
+        # walked through asksaveasfilename (and having last_output_directory
+        # written to config) only to be rejected afterward.
+        chapters_selected = [ch for ch, var in checkbox_vars.items()
+                             if var.get()]
+        if not chapters_selected:
+            messagebox.showwarning("Warning", "No chapters selected.")
             return
 
         nonlocal last_output_directory
@@ -1131,26 +1444,57 @@ def start_gui():
         voice = deemojify_voice(voice_combo.get())
         speed = speed_entry.get()
 
+        # Snapshot every Tk-held setting plus the book reference on the main
+        # thread. The conversion worker reads only these locals — widgets
+        # stay main-thread-only, and loading another book mid-run can't
+        # corrupt the conversion in flight.
+        try:
+            chapter_num = int(chapter_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Invalid chapter number.")
+            return
+        try:
+            chapter_gap = float(gap_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Invalid chapter gap value.")
+            return
+        book_snapshot = book
+        out_fmt = fmt
+        enc_ext = '.m4a' if out_fmt == 'm4b' else fmt_info['ext']
+        bitrate_value = bitrate_combo.get()
+        vbr_enabled = use_vbr.get()
+        gpu_enabled = gpu_acceleration.get()
+        detect_titles_enabled = detect_titles.get()
+        read_title_author_enabled = read_title_author_bool.get()
+        heteronyms_enabled = pref_heteronyms.get()
+        contractions_enabled = pref_contractions.get()
+        auto_acronyms_enabled = pref_auto_acronyms.get()
+        subs_snapshot = [dict(s) for s in word_substitutions]
+        overrides_snapshot = [dict(o) for o in phoneme_overrides]
+        rkey = render_key(voice, speed, chapter_gap,
+                          heteronyms_enabled, contractions_enabled,
+                          auto_acronyms_enabled,
+                          subs_snapshot, overrides_snapshot)
+
         # Check for existing wav files from a previous run. Build the same
-        # chapter_texts that run_conversion will build so the hash-based
-        # wav filenames line up — otherwise the resume prompt would look
-        # at the wrong paths and miss cached audio.
+        # chapter_texts AND render_key that run_conversion will use so the
+        # hash-based wav filenames line up — otherwise the resume prompt
+        # would look at the wrong paths, miss cached audio, or offer to
+        # resume a cache the conversion then can't hit.
         resume = False
         filename = Path(file_path).name
         wav_dir = Path(file_path).parent
         resume_stem = safe_stem(Path(filename).stem, wav_dir)
-        chapters_to_check = [ch for ch, var in checkbox_vars.items()
-                             if var.get()] or list(checkbox_vars.keys())
         resume_chapter_texts = []
-        for _i, _ch in enumerate(chapters_to_check, start=1):
+        for _i, _ch in enumerate(chapters_selected, start=1):
             _text = _ch.extracted_text
-            if _i == 1 and read_title_author_bool.get():
+            if _i == 1 and read_title_author_enabled:
                 _text = f"{title_override} by {author_override}.\n{_text}"
             resume_chapter_texts.append(_text)
         existing_wavs = [
-            chapter_wav_name(resume_stem, t, wav_dir)
+            chapter_wav_name(resume_stem, t, wav_dir, rkey)
             for t in resume_chapter_texts
-            if Path(chapter_wav_name(resume_stem, t, wav_dir)).exists()
+            if Path(chapter_wav_name(resume_stem, t, wav_dir, rkey)).exists()
         ]
         if existing_wavs:
             answer = messagebox.askyesnocancel(
@@ -1162,52 +1506,107 @@ def start_gui():
                 return  # Cancel
             if answer:
                 resume = True
-            else:
-                for wav in existing_wavs:
-                    Path(wav).unlink(missing_ok=True)
 
-        speed_entry.configure(state='disabled')
-        voice_combo.configure(state='disabled')
-        start_convert_button.pack_forget()
-        cancel_button.pack(side=tk.RIGHT, padx=5)
-        cancel_event.clear()
-        def _run_with_sleep_prevention():
-            try:
-                with prevent_sleep():
-                    run_conversion(resume)
-            except BaseException as e:
-                import traceback
-                print(f"Conversion thread crashed: {e}", file=sys.stderr)
-                traceback.print_exc()
-                root.after(0, lambda err=str(e): messagebox.showerror(
-                    "Error", f"Conversion thread crashed:\n\n{err}"))
-            finally:
-                root.after(0, enable_controls)
-        threading.Thread(target=_run_with_sleep_prevention,
-                         daemon=True).start()
+        if not try_begin_conversion():
+            messagebox.showwarning(
+                "Warning",
+                "A conversion is already running (here or in the batch "
+                "queue). Wait for it to finish first.")
+            return
+        # Everything between the slot claim above and the worker spawn runs
+        # under try/except that releases the slot: only the worker's finally
+        # calls end_conversion(), so an exception here (most plausibly a
+        # PermissionError from a transiently-held WAV below) would otherwise
+        # leave the lock held for the rest of the session — every later
+        # Convert / Start Batch / book load refuses with "already running".
+        try:
+            # Start-fresh deletion happens only after the slot is claimed,
+            # so the WAVs being deleted can't belong to a conversion that
+            # started while the resume dialog was open. unlink_with_retry
+            # absorbs the Windows transient-handle race (AV scanner, player
+            # still closing) that a bare unlink turns into a crash.
+            if existing_wavs and not resume:
+                # Start fresh clears the book's WAVs stem-wide — declining
+                # resume must also drop cache rendered under OTHER settings
+                # (other render_key, other filenames), not just the
+                # current-key files the prompt counted.
+                for wav in find_chapter_wavs(resume_stem, wav_dir):
+                    err = unlink_with_retry(wav)
+                    if err is not None:
+                        raise RuntimeError(
+                            f'Could not delete cached WAV {wav}: {err}')
+            speed_entry.configure(state='disabled')
+            voice_combo.configure(state='disabled')
+            file_button.configure(state='disabled')
+            clear_wavs_button.configure(state='disabled')
+            add_to_batch_button.configure(state='disabled')
+            start_convert_button.pack_forget()
+            cancel_button.pack(side=tk.RIGHT, padx=5)
+            cancel_event.clear()
+            def _run_with_sleep_prevention():
+                try:
+                    with prevent_sleep():
+                        run_conversion(resume)
+                except BaseException as e:
+                    import traceback
+                    print(f"Conversion thread crashed: {e}", file=sys.stderr)
+                    traceback.print_exc()
+                    root.after(0, lambda err=str(e): messagebox.showerror(
+                        "Error", f"Conversion thread crashed:\n\n{err}"))
+                finally:
+                    end_conversion()
+                    root.after(0, enable_controls)
+            threading.Thread(target=_run_with_sleep_prevention,
+                             daemon=True).start()
+        except Exception as e:
+            end_conversion()
+            enable_controls()
+            messagebox.showerror(
+                "Error", f"Could not start conversion:\n\n{e}")
+            return
 
     def cancel_conversion():
         cancel_event.set()
         progress_label.config(text="Cancelling...")
 
     def clear_cached_wavs():
+        if is_conversion_active():
+            # The button is disabled during a GUI conversion, but a BATCH
+            # run leaves the main window live — deleting WAVs mid-job
+            # yanks files the worker is about to encode.
+            messagebox.showwarning(
+                "Warning",
+                "Cannot clear WAVs while a conversion is running.")
+            return
         if not current_file_path:
             messagebox.showwarning("Warning",
                                    "Please select a book file first.")
             return
         wav_dir = Path(current_file_path).parent
         stem = safe_stem(Path(current_file_path).stem, wav_dir)
-        wavs = sorted(wav_dir.glob(f'{stem}_chapter_*.wav'))
+        # find_chapter_wavs, never glob: the stem is user-derived, and a
+        # bracketed book name ('The Hobbit [Illustrated]') is a character
+        # class to glob — matching nothing here, or another book's files.
+        wavs = find_chapter_wavs(stem, wav_dir)
         if not wavs:
             messagebox.showinfo("Clear WAVs", "No cached WAV files found.")
             return
         if messagebox.askyesno("Clear WAVs",
                                f"Delete {len(wavs)} cached WAV file(s) for "
                                f"'{stem}'?"):
+            errors = []
             for wav in wavs:
-                wav.unlink(missing_ok=True)
-            messagebox.showinfo("Clear WAVs",
-                                f"Deleted {len(wavs)} file(s).")
+                err = unlink_with_retry(wav)
+                if err is not None:
+                    errors.append(f'{wav}: {err}')
+            if errors:
+                messagebox.showwarning(
+                    "Clear WAVs",
+                    "Some files could not be deleted:\n" +
+                    "\n".join(errors))
+            else:
+                messagebox.showinfo("Clear WAVs",
+                                    f"Deleted {len(wavs)} file(s).")
 
     file_frame = tk.Frame(book_frame)
     file_frame.grid(row=0, column=1, pady=5, padx=10)
@@ -1221,6 +1620,9 @@ def start_gui():
 
     file_label = tk.Label(file_frame, text="")
     file_label.grid(row=1, column=0, columnspan=2, pady=5)
+    # Bound ONCE with a callable — rebinding per book load stacked a new
+    # tooltip handler (and Toplevel) for every file ever opened.
+    add_tooltip(file_label, lambda: current_file_path or 'No file selected')
 
     tk.Label(file_frame, text="Title:").grid(
         row=2, column=0, sticky='e', padx=(0, 6), pady=4)
@@ -1345,15 +1747,7 @@ def start_gui():
                 spd = 1.0
         except ValueError:
             spd = 1.0
-        secs = words / (150 * spd)
-        if secs < 60:
-            dur = '~<1 min'
-        elif secs < 3600:
-            dur = f'~{int(secs / 60)} min'
-        else:
-            h = int(secs / 3600)
-            m = int((secs % 3600) / 60)
-            dur = f'~{h} hr {m} min'
+        dur = format_duration_estimate(words, spd)
         summary_label.config(
             text=f'{n} chapters selected · {words:,} words · {dur}')
 
@@ -1372,28 +1766,32 @@ def start_gui():
 def on_playback_complete(play_label):
     global playing_sample
     playing_sample = False
-    play_label.config(text="▶️")
-    pygame.mixer.music.unload()
-    Path(PREVIEW_FILE).unlink(missing_ok=True)
-
-
-_CLI_COMMANDS = {'convert', 'list-chapters', 'list-voices'}
+    # Release the pygame handle and delete the temp WAV BEFORE touching the
+    # label: the label lives in the ChapterTreeView, which load_book_file
+    # destroys — a TclError on the config call used to skip unload/unlink,
+    # leaving the preview WAV locked on Windows for the rest of the session.
+    try:
+        # unload() exists only on pygame >= 2.0 — same guard as the other
+        # two call sites.
+        pygame.mixer.music.unload()
+    except Exception:
+        pass
+    try:
+        Path(PREVIEW_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        play_label.config(text="▶️")
+    except tk.TclError:
+        pass  # widget destroyed by a book load mid-preview; cleanup done
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] in _CLI_COMMANDS:
-        from .cli import main as cli_main
-        cli_main()
-    elif len(sys.argv) == 2 and sys.argv[1] == '--help':
-        readme = Path(__file__).parent.parent / 'README.md'
-        if readme.exists():
-            print(readme.read_text())
-        else:
-            print("Autiobooks: convert epub files to m4b audiobooks.\n"
-                  "Run without arguments to launch the GUI.\n"
-                  "CLI commands: convert, list-chapters, list-voices")
-    else:
-        start_gui()
+    # Kept for backward compatibility with console scripts generated by
+    # older installs; the real dispatcher lives in entry.py so CLI runs
+    # never pay this module's tkinter/PIL/pygame imports.
+    from .entry import main as _main
+    _main()
 
 
 if __name__ == "__main__":

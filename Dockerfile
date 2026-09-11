@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir \
 RUN python -m spacy download en_core_web_sm
 
 # Copy project and install
-COPY pyproject.toml setup.py README.md LICENSE ./
+COPY pyproject.toml README.md LICENSE ./
 COPY autiobooks/ autiobooks/
 RUN pip install --no-cache-dir .
 

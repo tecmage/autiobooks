@@ -22,10 +22,13 @@ PRs are welcome!
 - **PDF support** — open PDF files directly (pypdf, bundled as a required dependency)
 - **Multiple output formats** — M4B (with chapters), MP3, FLAC, Opus, or WAV
 - **Word substitutions** — user-defined find/replace pairs for fixing TTS mispronunciations
+- **Pronunciation overrides** — word→IPA mappings (with JSON import/export) that beat the built-in lexicons, plus optional spellout of unknown acronyms
+- **Custom voices** — drop kvoicewalk-style `.pt` voice tensors into `~/.autiobooks/voices/` and they appear in the voice dropdown (marked ✨)
+- **Batch queue** — queue multiple books with per-book settings and convert them sequentially
 - **Drag and drop** — drag an epub or PDF file directly onto the window to open it (install with `pip install "autiobooks[dnd]"`)
 - **Chapter title detection** — automatically extracts chapter titles from the epub's table of contents or headings (can be toggled off)
 - **Voice preview** — listen to a sample of any chapter before converting the full book
-- **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them
+- **Resume support** — if a conversion is cancelled or fails, previously completed chapters are kept so you can resume without re-converting them. Changing a setting that affects the audio (voice, speed, gap, pronunciation rules) re-converts the affected chapters rather than mixing old and new audio
 - **GPU acceleration** — CUDA support for significantly faster conversion on NVIDIA GPUs
 - **Adjustable settings** — reading speed, chapter gap duration, bitrate (64/128/192k), VBR mode, output format, and starting chapter number
 - **Editable metadata** — correct the title and author before converting
@@ -37,13 +40,138 @@ PRs are welcome!
 
 ## Requirements
 
-- **Python** 3.10–3.12 (3.13 is not supported due to dependency constraints)
-- **ffmpeg** — required for audio encoding and m4b creation
+- **Python** 3.10–3.12 (3.13+ is not supported — the Kokoro TTS engine and its `misaki` grapheme-to-phoneme dependency both cap at `<3.13` in their own package metadata)
+- **ffmpeg** (with **ffprobe**) — required for audio encoding and m4b creation. Both ship together in every standard ffmpeg package; the app checks for each up front, since ffprobe is what measures the chapter durations the m4b markers are built from
 - **tkinter** — required for the GUI (included with most Python installations)
 - **espeak-ng** (optional) — improves pronunciation of uncommon words. Without it, Kokoro handles most text well, but espeak-ng provides a fallback for words the model hasn't seen
 - **NVIDIA GPU** (optional) — enables CUDA acceleration for faster conversion. Works with any CUDA-capable GPU. Without a GPU, conversion runs on CPU
 
 ## Changelog
+
+#### 2.6.0
+
+Fourth full-codebase audit: 39 findings, all fixed.
+
+**Resume no longer splices stale audio** *(the big one)* — a cached chapter was reused whenever its WAV merely existed, so a run cancelled at chapter 30 and resumed under a different voice, speed, gap, or pronunciation setting shipped an audiobook that silently switched voice partway through; a pronunciation-override fix never reached already-cached chapters at all. The cache identity now folds in every render-affecting setting, so changed settings re-synthesize instead of splicing. Regenerating a custom `.pt` (kvoicewalk) between a cancel and a resume is likewise no longer ignored. Caches for unchanged built-in-voice settings stay valid across the upgrade.
+
+**Books that wouldn't open** — an EPUB whose NCX table of contents is degenerate (an empty `navMap`) made ebooklib hand back a shape the app couldn't iterate, so the book failed to load at all. Percent-encoded TOC links (`My%20Chapter.xhtml`) never matched their chapter, and footnote markers tagged `epub:type="noteref backlink"` were read aloud instead of skipped. A PDF whose parent bookmark shares a page with its first child no longer fabricates a duplicate chapter.
+
+**Chapter markers named the wrong chapters** — if a chapter failed transiently (CUDA OOM, a Windows file lock) in a book containing two chapters with identical text, every subsequent m4b marker was shifted onto the wrong audio and the last title was dropped, with no error. Titles now align by index rather than by "did some chapter with this text survive".
+
+**Audio correctness** — "See **Appendix C**" is no longer read as "Appendix 100" (same for `Part D`, `Volume L`, `Chapter M`; genuine `I`/`V`/`X` numerals still convert). Sentence-ending abbreviations keep their pause: *"42 Elm **St.** It was cold"* and *"Fifth **Ave.** The rain fell"* no longer merge into a pauseless run-on. An archery **bow** is no longer voiced as the gesture (*"took the bow and nocked an arrow"*), and *"a big **row** of houses"* is no longer the argument sense. A pronunciation override typed with a keyboard `g` (visually identical to IPA `ɡ`) silently dropped that sound from every occurrence book-wide — it now folds to the character Kokoro was trained on.
+
+**Custom voices** — a `.pt` named without a language prefix (`zoe.pt`) was read as language code `z` and the entire book was silently synthesized in **Mandarin**; `steve.pt` got a US flag and then failed on every chapter. Stems are now validated at discovery with a named warning. A regenerated `.pt` is also picked up instead of being served from a cache that never invalidated.
+
+**Selections and settings are respected** — clicking **Clear All** and then **Convert** used to re-tick and convert the entire book, the exact opposite of the last instruction (the CLI already refused); it now warns instead, before asking for an output path. A hand-edited `config.json` with a bad boolean (`"heteronyms": "enabled"`) crashed the GUI at launch before any window appeared; a mistyped substitution row (`{"find": 123}`) failed every chapter and reported the empty run as partial success. Both now degrade instead of crashing.
+
+**Batch queue** — opening a second Batch Queue window mid-run froze the first window's controls and let closing the duplicate cancel a run it didn't own; the window is now a singleton.
+
+**CLI** — `-q` suppressed *every* fatal startup error while still exiting 1, so a scripted caller saw a bare exit code and no diagnosis; errors now always print. `--chapters 1-999999999999` no longer walks the literal range. Both `ffmpeg` **and** `ffprobe` are checked up front — a box with only `ffmpeg` produced an m4b with every chapter marker at 00:00 after a full TTS run.
+
+**Packaging** — the Windows builds shipped without the pronunciation lexicon and `cmudict`, degrading pronunciation in the frozen app only; `cmudict` was a dev-only dependency despite shipping code importing it. `autiobooks --help` printed a 3-line stub on any installed copy. A `docker compose up --build` in a checkout that had run the Windows build uploaded ~19 GB of build output before starting. The ffmpeg download now verifies completeness and retries instead of silently accepting a truncated zip.
+
+**Split EPUBs read in order** — books processed by Calibre's file splitter (`part0004_split_000.html`, `_split_001`, …) could show dozens of untitled half-chapters dumped at the bottom of the chapter list, with doubled chapter markers in the m4b (one book put each chapter's entire body in a split file its table of contents never mentioned, leaving a 2-word "Chapter 1" stub as the listed chapter). Unreferenced split pieces now merge back into their chapter, and any chapter the table of contents skips is listed at its true reading position instead of the bottom. Table-of-contents links written with backslashes (a quirk of some Windows-built EPUBs) now match their chapters too.
+
+**Tests** — 567 tests (up from 397); heteronym audit harness now 168 cases (166 passing, 2 documented POS-tagger limits), and it now flags cases that pass vacuously.
+
+#### 2.5.0
+
+Third full-codebase audit: 46 findings, all fixed.
+
+**No more silent chapter loss** — a batch job with failed chapters used to report "Completed" (errors went only to stderr), and the CLI printed "Done" and exited 0; batch jobs now show *"Done (N ch failed)"* with the missing chapters listed, and the CLI warns and exits non-zero.
+
+**Audio correctness** — fixed heteronym misfires ("drew the **bow** to his cheek", "a ten **minute** walk", "**middle-aged**", "the **content** of the letter", "**row** between the vines"), `c.`→"circa" mangling lettered lists and "b.c.", and un-expanded `Ave.`/`Blvd.`. Pronunciation overrides pasted with dictionary parentheses (`/ˈlɪs(ə)n/`) no longer silently delete the word from the audio; accented overrides/substitutions (Zoë, résumé) now match; user substitutions beat contraction expansion and heteronym rules; affricates fold to Kokoro's real `ʤ`/`ʧ` codes; auto-acronym spellout no longer corrupts pronunciation markdown or letterizes real words.
+
+**Input parsing** — nested tables no longer read twice; the flagged EPUB cover beats images merely named "cover"; out-of-order PDF outlines no longer drop/duplicate chapters; owner-password-only PDFs open; part-divider pages sit in the right place in the chapter tree.
+
+**Reliability** — a locked WAV can no longer brick conversions until restart; the Batch Queue window can be closed and reopened mid-run without losing status (and no longer re-converts finished jobs over their own output); quitting mid-conversion no longer inhibits system sleep until reboot on Linux/macOS; loading a new book mid-preview no longer wedges previews; CUDA cancel works during extraction and partial installs offer a re-download instead of wedging as "Already Installed"; the footer duration estimate was 60× too small.
+
+**CLI / voices** — the CLI finds the GUI-managed ffmpeg on Windows and fails fast when ffmpeg is missing; a custom `.pt` voice named after a built-in now wins instead of being silently ignored; `--chapters` warns about dropped/invalid ranges; `-h` prints help instead of launching the GUI.
+
+**GUI polish** — closing the Append dialog mid-append asks and genuinely cancels; multi-row delete in Word Substitutions; dark-theme progress bars; gap/chapter range validation on Convert; per-instance preview temp files; no UI freeze on the first preview click.
+
+**Tests** — 391 tests (up from 324); heteronym audit harness now 162 cases (160 passing, 2 documented POS-tagger limits).
+
+#### 2.4.0
+
+**Audio correctness (text handling):**
+- **Number ranges are no longer mashed into one word** — a hyphen between bare digits (`10-20`, `3-5`, a `3-2` score) now reads "10 to 20" / "3 to 5" / "3 to 2"; previously misaki glued the digits into a single nonsense token ("tentwenty", "threefive"). The rule fires only when digits flank the hyphen, so `20-year-old`, `Catch-22`, `3-D`, and `F-16` are left intact
+- **Typewriter em-dashes no longer fuse the surrounding words** — `wait--no` and `wait -- no` now become a comma pause ("wait, no") instead of "waitno"; a run of `---` was previously deleted entirely, mashing the words together. Standalone `---` / `***` scene-break lines are still removed
+- **Degree signs no longer glue to the unit** — `98.6°F` reads "98.6 degrees F", not "degreesF" (which Kokoro voiced as one slurred word); `100°C` → "100 degrees C"
+- **`Part MIX` is no longer "Part 1009"** — `MIX` (and `DIV`) are valid Roman numerals but far more often ordinary words; the roman pass now leaves any c/d/l/m token that spells a dictionary word alone, while genuine numerals (`XI`, `VII`, `XIV`, `MCM`) still convert
+- **Sentence-ending abbreviations keep their pause** — `"…and so on, etc. Then he left."` no longer collapses into "et cetera Then he left." (the period that doubled as the sentence stop was being eaten); `etc.` / `et al.` retain a period only at a real sentence boundary, never mid-sentence and never for titles like `Mr.`
+- **Stat/status tables read naturally instead of one-cell-at-a-time** — LitRPG/progression-fantasy status screens are HTML tables, and each cell ("Strength:", "432", "Mana:", "306"…) was being read as its own isolated utterance, so the whole block dragged and went flat. Table rows now flatten to a single flowing line (*"Strength: 432, Mana: 306, Armor: 2679"*)
+- **"Los Angeles" no longer says "Lohz Angeles"** — *Angeles* was already corrected, but *Los* was being voiced /loʊz/ (rhyming with "rose"); it now reads /lɔs/ ("loss"), and the fix also covers Los Alamos / Los Gatos without touching names like Carlos or Marcos
+- **"prayer" now rhymes with "air"** — it was being read as the two-syllable "PRAY-er" (one who prays) instead of the one-syllable devotion sense (*she said a prayer*); both singular and plural are fixed. Also added the verb ***frequent*** (free-KWENT, *they frequent the bar*) vs the adjective (FREE-kwent), and the adjective ***consummate*** (kuhn-SUM-it, *a consummate professional*) vs the verb
+- **More heteronyms pronounced correctly** — a deep-dive audit added handling for attributive `-ed` adjectives (*a **learned** man*, *a **blessed** event*, *an **aged** man*, *a **cursed** sword* now take the two-syllable "-id" pronunciation, distinct from the verbs *she learned*, *he cursed*); ***beloved*** is now three syllables (be-LUV-id); and the verb ***delegate*** (de-le-GATE) is distinguished from the noun (DEL-uh-gut). Also fixed two existing-rule misfires: *the **minute** hand* / *the **minute** book* are no longer read as "my-NOOT" (tiny), *a **minute** amount* now correctly **is** "my-NOOT", and *she tied a **bow** in her hair* is the /boʊ/ ribbon, not the /baʊ/ bend
+- **"content creator" is no longer mispronounced as the adjective** — the heteronym rule that switches `content` to the "satisfied" pronunciation (con-TENT) on a nearby "is/was/feel…" was firing on noun compounds like *"he is a content creator"* / *"the content manager"*, where it should stay the noun (CON-tent). It now keeps the noun pronunciation whenever `content` directly precedes another noun
+- **LitRPG stat-block arrows no longer reach the narration** — progression-fantasy chapters use a zoo of arrow glyphs (`➔`, `⇒`, `➜`, `⟶`, `⮕`) in skill/stat lines like `Skill (lv50) ➔ Skill (lv60)`; only the basic `←↑→↓` were stripped before, so the fancier variants were read aloud as gibberish. Every arrow variant is now removed. (Found by sampling 42 real chapters across six Royal Road fictions through the conversion pipeline)
+
+**Contraction handling:**
+- **Possessives are no longer turned into "is" / "has"** — the contraction expander keyed only on the word *after* `'s`, so possessive noun phrases followed by a participle were corrupted (`the book's torn pages` → "the book **has** torn pages", `the city's growing population` → "the city **is** growing population"). It now keys on spaCy's tag for the clitic itself, so possessives are left alone while genuine contractions still expand correctly
+- **Contraction expansion is now off by default** — Kokoro already pronounces contractions correctly on its own, so the expansion carried risk (see above) with no pronunciation benefit. The *Contraction resolution* checkbox in Preferences (and the CLI `--contractions` flag) still turn it on; existing saved settings are preserved
+
+**Tests:**
+- New regression coverage for contraction disambiguation, numeric ranges, em-dashes, degree units, and the roman-numeral word guard
+
+#### 2.3.0
+
+**Audio correctness:**
+- **The pronoun "I" is no longer read as "1"** — the roman-numeral pass matched `book I` / `part I` / `act I` case-insensitively, so first-person prose like *"The book I read"* became *"The book 1 read"*. Bare single-letter numerals now convert only with a capitalized keyword ("Book I covers…") or at the end of a line/clause ("chapter i."); strict roman validation also stops `VV` → 10
+- **User pronunciation overrides now genuinely always win** — overriding a word the built-in contextual rules also handle (`bowed`, `resume`, …) used to produce nested `[[word](/a/)](/b/)` markdown that misaki read as garbage. Built-in markdown-emitting passes now skip user-configured words, and substitutions/overrides skip matches inside existing markdown
+- **Heteronym context windows stop at sentence boundaries** — *"They take the stage. Bow strings snapped."* no longer borrows "take" from the previous sentence to force the wrong sense of "Bow" (same for content/bass/row/lead/tearing)
+- **"Thanks, Ed." is no longer "Thanks, Edition"** — `Ed.` expands only after a digit/ordinal (`2nd Ed.`), joining the context-aware `St.`/`No.` resolvers
+- **Acronym spellout no longer letterizes shouting** — with *Spell out unknown acronyms* enabled, all-caps emphasis (`STOP`, `THE END`) and roman numerals beyond XII (`XIII`) kept their pronunciation instead of becoming `S. T. O. P.`
+- **Non-decomposable letters reach the TTS** — `æ Æ œ Œ ø ß ł đ ð þ` now fold to ASCII (`Encyclopædia`, `Brontë's œuvre` were silently dropped); URLs are still stripped but no longer eat the comma/period after them
+
+**CLI ↔ GUI parity:**
+- **The CLI now follows your saved GUI preferences** — voice, heteronyms, contractions, and read-title-author default to what you set in the app; new `--heteronyms/--no-heteronyms`, `--contractions/--no-contractions`, and `--read-title-author/--no-read-title-author` flags override per-run
+- **CLI prepends "Title by Author" to chapter 1** exactly like the GUI, so chapter-1 resume caches interoperate between the two
+- **Headless CLI** — the console script dispatches CLI commands before any GUI import; `autiobooks list-voices` works on a server without tkinter/pygame
+- **One duplicate-detection policy** (new `selection.py`) — the GUI tree and CLI auto-select previously disagreed on whitespace-variant and empty chapters
+- **Shared assembly path** (`engine.assemble_output`) — GUI, batch, and CLI used three drifted copies of the post-TTS assembly block; relative input paths (`convert books/x.epub`) no longer break ffmpeg concat
+- Friendly errors for encrypted PDFs and corrupt files instead of tracebacks
+
+**Structural fixes:**
+- **PDF outlines build the correct chapter tree** — every multi-entry outline previously nested all chapters under the first one, pushing chapter one's own text to the end of the tree
+- **A cover image PIL can't decode no longer aborts the whole book load** (SVG covers, corrupt JPEGs) — the book opens with the placeholder cover
+- **EPUB cache is evicted on book switch** — browsing many books in one session no longer grows memory without bound; toggling *Detect chapter titles* off now actually clears previously detected titles
+- **Batch queue race closed** — removing a pending job at the exact moment the worker picked it up could yank the job mid-handoff; the `[n/total]` counter no longer overflows when jobs are added mid-run; batch run state survives closing and reopening the queue window; quitting the app now signals a running batch to stop at the chapter boundary
+
+**Reliability:**
+- **Final output files are written atomically** — a crash or kill mid-mux can no longer leave a truncated `.m4b`/`.mp3` at your chosen path that looks finished but isn't
+- **ffmpeg runtime extraction is atomic and self-healing** — a kill mid-download used to leave a permanently broken `ffmpeg.exe` that passed the existence check on every later launch; the binary is now validated each start and re-downloaded if broken
+- **CUDA download dialog no longer crashes when closed via the X** (now acts as Cancel)
+- **ffprobe failures show the actual cause** instead of `returned non-zero exit status 1`
+- **Preview and conversion are mutually exclusive** — generating a preview mid-conversion shared the TTS pipeline and global torch device state with the worker (mixed-device crash risk); preview errors also surface properly now (a variable-capture bug silently swallowed them)
+- A corrupt `config.json` substitution/override list degrades to empty instead of crashing mid-conversion; Clear WAVs is blocked while a batch is converting the same book
+
+**Tests/docs:**
+- 36 new regression tests (300 total, incl. new PDF outline-shape suite), end-to-end CLI conversion verified, all reference docs (API_REFERENCE/THREADING_MODEL/ERROR_HANDLING/DATA_FLOW) re-synced against the code; `setup.py` removed (poetry-core is the only build path)
+
+#### 2.2.0
+
+**Audio correctness:**
+- **FLAC output contained only chapter one** — the ffmpeg concat demuxer silently keeps just the first segment when stream-copying raw FLAC; assembly now re-encodes (lossless, bit-faithful audio). Every prior multi-chapter FLAC conversion was affected
+- **Ellipses are no longer deleted** — the scene-break stripper had `.` in its character class, so every `...` (and `…`, which normalizes to `...`) vanished, erasing trailing-off pauses and even sentence stops (`"No... I will not."` → `"No I will not."`) book-wide
+- **Chapters follow the EPUB spine** (reading order) instead of manifest order — books whose manifest isn't written in reading order produced shuffled audio while the chapter tree looked correct
+- **Roman numeral false positives fixed** — `"part mix"` no longer becomes `"part 1009"`; lowercase numerals are only accepted when built from i/v/x (`chapter iv` still works)
+- **Abbreviations expand before punctuation** — `Smith et al., 2020`, `(etc.)`, and `etc."` previously stayed unexpanded
+- **Word-boundary fixes** — whole-word substitutions with symbol edges (`$100`) now match; pronunciation overrides anchor per-edge so `O'Brien` keeps both boundaries; words with phoneme overrides are protected from auto-acronym spellout
+
+**Output metadata:**
+- **MP3/FLAC/Opus outputs now carry title/artist/album tags**, and MP3/FLAC embed the cover art (previously non-M4B files had no metadata at all)
+- **PDF covers are embedded in M4B output** from the GUI and batch queue (previously CLI-only)
+
+**Reliability:**
+- **Single-conversion guard** — the main Convert flow and the Batch Queue are now mutually exclusive (both flip global torch GPU state and share per-book WAV paths); the conversion worker reads all settings from main-thread snapshots, so loading another book mid-run can no longer corrupt titles/cover of the conversion in flight
+- **Cancelling the CUDA download no longer freezes the app** until the full 2.5 GB completes; the download offer is suppressed on CPU-only torch builds (the DLLs can't activate there), and "Don't ask again" now works when answering No
+- **Conversion state fixes** — wrong-book conversion with auto-select off (stale chapter selection), failed book loads no longer half-swap state, the voice dropdown stays read-only after converting, per-chapter progress no longer jumps straight to ~95%, fully-selected sections show a proper checkmark instead of the indeterminate dash
+- **Append M4B refuses output = input** — writing onto the base file mid-read destroyed it
+- **Misc:** corrupt `config.json` no longer crashes startup; duplicate pronunciation-override words are rejected (they nest markdown and garble audio); Preferences persist on window-X close; preview validates speed and handles empty chapters gracefully; closing mid-conversion asks for confirmation; settings saved by one component no longer get wiped by another's save
+
+**Tests/CI:**
+- ~40 new regression tests (`test_config.py`, `test_epub_parser.py` with a spine-order fixture, ellipsis/roman/abbreviation/boundary/spellout classes); CI now installs dev extras and runs the test suite on every push
 
 #### 2.1.1
 
@@ -348,7 +476,7 @@ PRs are welcome!
 
 ## How to install and run
 
-Requires Python 3.10–3.12 (3.13 is not supported).
+Requires Python 3.10–3.12 (3.13+ is not supported — see [Requirements](#requirements)).
 
 ### 1. Install system dependencies
 
@@ -398,7 +526,8 @@ python -m autiobooks
 
 **CLI mode (headless):**
 ```bash
-# Convert with default settings (auto-selects chapters, af_heart voice)
+# Convert with default settings (auto-selects chapters; voice, pronunciation
+# toggles, and "Title by Author" intro follow your saved GUI preferences)
 python -m autiobooks convert book.epub
 
 # Specify voice, speed, and output format
@@ -407,12 +536,17 @@ python -m autiobooks convert book.epub --voice bm_daniel --speed 1.2 --format mp
 # Convert specific chapters only
 python -m autiobooks convert book.epub --chapters 1,3-5,8
 
+# Override saved preferences for one run
+python -m autiobooks convert book.epub --no-heteronyms --no-read-title-author
+
 # List available chapters
 python -m autiobooks list-chapters book.epub
 
 # List all available voices
 python -m autiobooks list-voices
 ```
+
+The CLI shares its chapter auto-selection, text normalization, and resume cache with the GUI — converting the same book from either interface produces the same audio, and a cancelled GUI run can be resumed from the CLI (or vice versa). The `autiobooks` console script and CLI subcommands run fully headless; tkinter is only needed for the GUI.
 
 The program creates `.wav` files for each chapter, then combines them into a `.m4b` file for playing using an audiobook player.
 

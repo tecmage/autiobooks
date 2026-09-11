@@ -160,6 +160,11 @@ def apply_theme(root, theme_name):
     root.option_add('*TCombobox*Listbox.selectBackground', t['select_bg'])
     root.option_add('*TCombobox*Listbox.selectForeground', t['select_fg'])
 
+    style.configure('Horizontal.TProgressbar',
+                    background=t['select_bg'], troughcolor=t['entry_bg'],
+                    bordercolor=t['button_border'],
+                    lightcolor=t['select_bg'], darkcolor=t['select_bg'])
+
     style.configure('TPanedwindow', background=t['bg'])
     style.configure('TScrollbar', background=t['bg'],
                     troughcolor=t['entry_bg'], bordercolor=t['bg'],

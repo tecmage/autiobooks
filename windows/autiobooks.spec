@@ -1,7 +1,7 @@
 import sys
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
 block_cipher = None
 
@@ -17,6 +17,8 @@ hidden_imports = [
     'autiobooks.runtime',
     'autiobooks.text_processing',
     'autiobooks.voices_lang',
+    'autiobooks.misaki',
+    'autiobooks.misaki.data',
     'pypdf',
     'kokoro',
     'kokoro.pipeline',
@@ -47,7 +49,14 @@ hidden_imports = [
 hooks_dir = project_root / 'autiobooks' / 'hooks'
 hookspath = [str(hooks_dir)] if hooks_dir.exists() else []
 
-datas = []
+datas = collect_data_files('autiobooks.misaki', includes=['data/*.json'])
+
+# entry._help_text() reads the installed distribution's METADATA first, but a
+# frozen bundle has no dist-info, so metadata() raises and it falls back to
+# probing Path(__file__).parent.parent / 'README.md' — which lands in
+# _internal/ here. Shipping the README to '.' is what makes `--help` show the
+# real text instead of the 3-line stub (AUDIT_2026-07-16.md §5.8).
+datas += [(str(project_root / 'README.md'), '.')]
 
 excludes = [
     'torch.distributed',
@@ -62,6 +71,7 @@ spacy_model_datas, spacy_model_binaries, spacy_model_hiddenimports = collect_all
 # at import time. build.bat overwrites _internal/misaki/en.py with our patched copy
 # (HAS_SPACY patch + silenced TODO:NUM debug) after PyInstaller runs.
 misaki_datas, misaki_binaries, misaki_hiddenimports = collect_all('misaki')
+cmudict_datas, cmudict_binaries, cmudict_hiddenimports = collect_all('cmudict')
 
 cuda_dlls = ['cublas', 'cudnn', 'cudart', 'cufft', 'curand', 'cusolver', 'nccl', 'nvjit', 'nvtx', 'cupti']
 torch_binaries = [(src, dst) for src, dst in torch_binaries
@@ -83,9 +93,9 @@ vc_redist = [
 a = Analysis(
     [str(project_root / 'autiobooks' / '__main__.py')],
     pathex=[str(project_root), str(Path(sys.prefix) / 'Lib' / 'site-packages' / 'torch' / 'lib')],
-    binaries=torch_binaries + vc_redist + language_tags_binaries + csvw_binaries + segments_binaries + kokoro_binaries + phonemizer_binaries + espeakng_loader_binaries + spacy_binaries + spacy_model_binaries + misaki_binaries,
-    datas=datas + torch_datas + kokoro_datas + language_tags_datas + csvw_datas + segments_datas + phonemizer_datas + espeakng_loader_datas + spacy_datas + spacy_model_datas + misaki_datas,
-    hiddenimports=hidden_imports + torch_hiddenimports + kokoro_hiddenimports + language_tags_hiddenimports + csvw_hiddenimports + segments_hiddenimports + phonemizer_hiddenimports + espeakng_loader_hiddenimports + spacy_hiddenimports + spacy_model_hiddenimports + misaki_hiddenimports,
+    binaries=torch_binaries + vc_redist + language_tags_binaries + csvw_binaries + segments_binaries + kokoro_binaries + phonemizer_binaries + espeakng_loader_binaries + spacy_binaries + spacy_model_binaries + misaki_binaries + cmudict_binaries,
+    datas=datas + torch_datas + kokoro_datas + language_tags_datas + csvw_datas + segments_datas + phonemizer_datas + espeakng_loader_datas + spacy_datas + spacy_model_datas + misaki_datas + cmudict_datas,
+    hiddenimports=hidden_imports + torch_hiddenimports + kokoro_hiddenimports + language_tags_hiddenimports + csvw_hiddenimports + segments_hiddenimports + phonemizer_hiddenimports + espeakng_loader_hiddenimports + spacy_hiddenimports + spacy_model_hiddenimports + misaki_hiddenimports + cmudict_hiddenimports,
     hookspath=hookspath,
     hooksconfig={},
     runtime_hooks=[str(project_root / 'autiobooks' / 'hooks' / 'pyi_rth_torch.py')],
